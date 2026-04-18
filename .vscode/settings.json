@@ -1,0 +1,16 @@
+{
+  "files.associations": {
+    "*.mpc": "python",
+    "*.mp": "python"
+  },
+  "python.analysis.exclude": [
+    "**/*.mpc",
+    "**/*.mp"
+  ],
+  "[python]": {
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.formatOnSave": false
+  }
+}
+

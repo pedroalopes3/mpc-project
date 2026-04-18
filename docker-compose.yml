@@ -1,0 +1,102 @@
+x-mpc-course-spdz: &mpc_course_spdz
+  image: mpc-course-spdz
+
+services:
+  party0:
+    <<: *mpc_course_spdz
+    build:
+      context: .
+    container_name: mpc_party_0
+    tty: true            # Allocates a pseudo-TTY
+    stdin_open: true     # Keeps stdin open so you can interact with the shell
+    volumes:
+      # Keep MP-SPDZ output (Bytecode/Schedules) off the host FS to avoid EDEADLK
+      # issues on synced/networked folders (e.g., OneDrive).
+      - .:/workspace
+      - programs:/mp-spdz/Programs
+      # Separate static config/inputs (host-mounted) from dynamic runtime state.
+      - ${MPSPDZ_CONFIG:-./Config}:/mp-spdz/Config
+      - ${MPSPDZ_INPUTS:-./Inputs}:/mp-spdz/Inputs
+      - player_data:/mp-spdz/Player-Data
+    # Initialize MP-SPDZ config once, then idle.
+    command:
+      - bash
+      - -lc
+      - |
+          set -euo pipefail
+          CFG=/mp-spdz/Config
+          IPS="$$CFG/IPs"
+          mkdir -p "$$CFG"
+
+          # MP-SPDZ does no peer discovery; parties need a host list for `-ip`.
+          # Create it automatically for the docker-compose network if missing.
+          if [ ! -s "$$IPS" ] || grep -qE '^(party[0-9]+:|localhost:)' "$$IPS"; then
+            if mkdir "$$CFG/.ips_lock" 2>/dev/null; then
+              printf "party0\nparty1\nparty2\n" > "$$IPS"
+              rmdir "$$CFG/.ips_lock"
+            fi
+          fi
+
+          exec sleep infinity
+
+  party1:
+    <<: *mpc_course_spdz
+    container_name: mpc_party_1
+    tty: true
+    stdin_open: true
+    volumes:
+      - .:/workspace
+      - programs:/mp-spdz/Programs
+      - ${MPSPDZ_CONFIG:-./Config}:/mp-spdz/Config
+      - ${MPSPDZ_INPUTS:-./Inputs}:/mp-spdz/Inputs
+      - player_data:/mp-spdz/Player-Data
+    command:
+      - bash
+      - -lc
+      - |
+          set -euo pipefail
+          CFG=/mp-spdz/Config
+          IPS="$$CFG/IPs"
+          mkdir -p "$$CFG"
+          if [ ! -s "$$IPS" ] || grep -qE '^(party[0-9]+:|localhost:)' "$$IPS"; then
+            if mkdir "$$CFG/.ips_lock" 2>/dev/null; then
+              printf "party0\nparty1\nparty2\n" > "$$IPS"
+              rmdir "$$CFG/.ips_lock"
+            fi
+          fi
+          exec sleep infinity
+    depends_on:
+      - party0
+
+  party2:
+    <<: *mpc_course_spdz
+    container_name: mpc_party_2
+    tty: true
+    stdin_open: true
+    volumes:
+      - .:/workspace
+      - programs:/mp-spdz/Programs
+      - ${MPSPDZ_CONFIG:-./Config}:/mp-spdz/Config
+      - ${MPSPDZ_INPUTS:-./Inputs}:/mp-spdz/Inputs
+      - player_data:/mp-spdz/Player-Data
+    command:
+      - bash
+      - -lc
+      - |
+          set -euo pipefail
+          CFG=/mp-spdz/Config
+          IPS="$$CFG/IPs"
+          mkdir -p "$$CFG"
+          if [ ! -s "$$IPS" ] || grep -qE '^(party[0-9]+:|localhost:)' "$$IPS"; then
+            if mkdir "$$CFG/.ips_lock" 2>/dev/null; then
+              printf "party0\nparty1\nparty2\n" > "$$IPS"
+              rmdir "$$CFG/.ips_lock"
+            fi
+          fi
+          exec sleep infinity
+    depends_on:
+      - party0
+
+volumes:
+  programs:
+  player_data:

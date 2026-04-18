@@ -1,0 +1,66 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "mp-spdz: up (3 parties)",
+      "type": "shell",
+      "command": "docker compose up -d --build party0 party1 party2",
+      "problemMatcher": []
+    },
+    {
+      "label": "mp-spdz: down",
+      "type": "shell",
+      "command": "docker compose down",
+      "problemMatcher": []
+    },
+    {
+      "label": "mp-spdz: compile (current file)",
+      "type": "shell",
+      "command": "docker compose exec -T party0 bash -lc 'set -euo pipefail; mkdir -p /mp-spdz/Programs/Source; cp -f \"/workspace/${relativeFile}\" \"/mp-spdz/Programs/Source/${fileBasename}\"; cd /mp-spdz; python3 ./compile.py \"${fileBasenameNoExtension}\"'",
+      "problemMatcher": []
+    },
+    {
+      "label": "mp-spdz: run mascot party0 (current program)",
+      "type": "shell",
+      "command": "docker compose exec party0 bash -lc 'cd /mp-spdz && ./mascot-party.x -N 3 -p 0 -ip Config/IPs -IF Inputs/Input \"${fileBasenameNoExtension}\"'",
+      "presentation": {
+        "panel": "new",
+        "focus": false,
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "mp-spdz: run mascot party1 (current program)",
+      "type": "shell",
+      "command": "docker compose exec party1 bash -lc 'cd /mp-spdz && ./mascot-party.x -N 3 -p 1 -ip Config/IPs -IF Inputs/Input \"${fileBasenameNoExtension}\"'",
+      "presentation": {
+        "panel": "new",
+        "focus": false,
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "mp-spdz: run mascot party2 (current program)",
+      "type": "shell",
+      "command": "docker compose exec party2 bash -lc 'cd /mp-spdz && ./mascot-party.x -N 3 -p 2 -ip Config/IPs -IF Inputs/Input \"${fileBasenameNoExtension}\"'",
+      "presentation": {
+        "panel": "new",
+        "focus": false,
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "mp-spdz: run mascot (3 parties, parallel)",
+      "dependsOrder": "parallel",
+      "dependsOn": [
+        "mp-spdz: run mascot party0 (current program)",
+        "mp-spdz: run mascot party1 (current program)",
+        "mp-spdz: run mascot party2 (current program)"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}

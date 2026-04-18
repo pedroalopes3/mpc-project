@@ -1,0 +1,20 @@
+# MP-SPDZ runtime state (inputs, certs, sockets, etc.)
+Player-Data/*
+!Player-Data/.gitkeep
+
+# Static/run configuration and test inputs (generated)
+Inputs/Input-Binary-P*-*
+!Config/.gitkeep
+!Inputs/.gitkeep
+
+# MP-SPDZ build artifacts
+Bytecode/*
+!Bytecode/.gitkeep
+Functions/*
+!Functions/.gitkeep
+Public-Inputs/*
+!Public-Inputs/.gitkeep
+Scedule/*
+!Scedule/.gitkeep
+*.mpc
+*.md
