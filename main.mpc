@@ -1,0 +1,27 @@
+print("Hello World!")
+
+
+for i in range(10):
+    # inputs das bids para cada party 
+    party0_input = sint.get_input_from(0)
+    party1_input = sint.get_input_from(1)
+    party2_input = sint.get_input_from(2)
+
+    
+    public_party0_input = party0_input.reveal()
+    public_party1_input = party1_input.reveal()
+    public_party2_input = party2_input.reveal()
+
+    public_sum = public_party0_input + public_party1_input + public_party2_input
+
+    # realiza a soma dos inputs das parties
+    secret_sum = party0_input + party1_input + party2_input
+
+    diference = secret_sum.reveal() - public_sum
+
+    # revela a soma  
+    print_ln("\n\n||||||||||||||||||||||||||||||Round %s||||||||||||||||||||||||||||||||||||\nThe secret sum is: %s, the public one: %s, difference: %s\nParty 0: %s | Party 1: %s | Party 2: %s\n\n\n", i,secret_sum.reveal(), public_sum, diference, public_party0_input, public_party1_input, public_party2_input)
+
+
+
+    
