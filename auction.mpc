@@ -1,0 +1,70 @@
+
+ 
+
+# Auction Parameters
+N_PARTIES = 3
+N_ASSETS = 3
+N_ORDERS = 10
+MAX_PRICE = 200 # Discrete price ladder max
+
+def run_auction(asset_id):
+    # Arrays to hold secret orders: [price, qty]
+    bids_p = sint.Array(N_PARTIES * N_ORDERS)
+    bids_q = sint.Array(N_PARTIES * N_ORDERS)
+    asks_p = sint.Array(N_PARTIES * N_ORDERS)
+    asks_q = sint.Array(N_PARTIES * N_ORDERS)
+
+    # 1. Input Phase
+    idx = 0
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            bids_p[idx] = sint.get_input_from(party)
+            bids_q[idx] = sint.get_input_from(party)
+            asks_p[idx] = sint.get_input_from(party)
+            asks_q[idx] = sint.get_input_from(party)
+            idx += 1
+
+    # 2. Find Clearing Price (Scanning Price Ladder)
+    max_vol = sint(0)
+    best_p_low = sint(MAX_PRICE)
+    best_p_high = sint(0)
+
+    for p in range(1, MAX_PRICE + 1):
+        demand = sint(0)
+        supply = sint(0)
+        
+        # Calculate D(p)
+        for i in range(N_PARTIES * N_ORDERS):
+            is_valid_bid = bids_p[i] >= p
+            demand += is_valid_bid * bids_q[i]
+            
+        # Calculate S(p)
+        for i in range(N_PARTIES * N_ORDERS):
+            is_valid_ask = (asks_p[i] <= p) * (asks_p[i] > 0)
+            supply += is_valid_ask * asks_q[i]
+            
+        # V(p) = min(D(p), S(p))
+        vol = (demand < supply).if_else(demand, supply)
+        
+        # Update logic for maximum volume
+        is_new_max = vol > max_vol
+        is_equal_max = vol == max_vol
+        
+        max_vol = is_new_max.if_else(vol, max_vol)
+        best_p_low = is_new_max.if_else(p, best_p_low)
+        best_p_high = (is_new_max + is_equal_max).if_else(p, best_p_high)
+
+    # Midpoint tie-break
+    clearing_price = (best_p_low + best_p_high) / 2
+    
+    # 3. Reveal Output
+    print_ln("Asset %s Results:", asset_id)
+    print_ln("Clearing Price: %s", clearing_price.reveal())
+    print_ln("Transacted Volume: %s", max_vol.reveal())
+    
+    # Note: Pro-rata allocation requires knowing the total eligible quantity.
+    # To keep the baseline simple and avoid secret division, we reveal the 
+    # clearing price first, then locally compute fills, or use sfix for division if kept secret.
+
+for asset in range(N_ASSETS):
+    run_auction(asset)
