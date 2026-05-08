@@ -42,7 +42,7 @@ def run_auction(asset_id):
             supply += is_valid_ask * asks_q[i]
             
         # V(p) = min(D(p), S(p))
-        vol = demand if demand < supply else supply
+        vol = (demand < supply).if_else(demand, supply)
         
         # Update logic for maximum volume
         is_new_max = vol > max_vol
