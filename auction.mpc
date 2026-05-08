@@ -3,7 +3,7 @@
 N_PARTIES = 3
 N_ASSETS = 3
 N_ORDERS = 10
-MAX_PRICE = 200 # Discrete price ladder max
+MAX_PRICE = 500 # Discrete price ladder max
 
 def run_auction(asset_id):
     # Arrays to hold secret orders: [price, qty]
@@ -44,7 +44,7 @@ def run_auction(asset_id):
         # V(p) = min(D(p), S(p))
         vol = (demand < supply).if_else(demand, supply)
         
-        # Update logic for maximum volume
+        # Update logic for maximum volume, these are all based of True/False
         is_new_max = vol > max_vol
         is_equal_max = vol == max_vol
         
@@ -53,16 +53,15 @@ def run_auction(asset_id):
         best_p_high = (is_new_max + is_equal_max).if_else(p, best_p_high)
 
     # Midpoint tie-break
-    clearing_price = (best_p_low + best_p_high) / 2
+    clearing_price = (best_p_low + best_p_high)
     
     # 3. Reveal Output
+    # ONLY NON-SECRETS CLEARING PRICE & VOLUME, FILLS
     print_ln("Asset %s Results:", asset_id)
-    print_ln("Clearing Price: %s", clearing_price.reveal())
+    print_ln("Clearing Price: %s", clearing_price.reveal()/2)
     print_ln("Transacted Volume: %s", max_vol.reveal())
     
-    # Note: Pro-rata allocation requires knowing the total eligible quantity.
-    # To keep the baseline simple and avoid secret division, we reveal the 
-    # clearing price first, then locally compute fills, or use sfix for division if kept secret.
+    #NEED TO ADD IN THE PRO-RATA ALLOCATION NOW, THE QUANTITIES MUST REMAIN SECRET
 
 for asset in range(N_ASSETS):
     run_auction(asset)
