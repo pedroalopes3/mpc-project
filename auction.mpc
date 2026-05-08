@@ -1,6 +1,4 @@
 
- 
-
 # Auction Parameters
 N_PARTIES = 3
 N_ASSETS = 3

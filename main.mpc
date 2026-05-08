@@ -1,3 +1,4 @@
+from Compiler.types import sint, print_ln
 print("Hello World!")
 
 
