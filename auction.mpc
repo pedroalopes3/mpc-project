@@ -50,6 +50,10 @@ def run_auction(asset_id):
     # Midpoint tie-break: p* = (p_low + p_high) / 2
     clearing_price = best_p_low + best_p_high
 
+    # Immediately reveal clearing price and vol once calculated
+    clear_price = clearing_price.reveal() // 2
+    clear_vol = max_vol.reveal()
+
     # 3. Determine eligible orders at clearing price (without modifying original arrays)
     bids_eligible = sint.Array(N_PARTIES * N_ORDERS)
     asks_eligible = sint.Array(N_PARTIES * N_ORDERS)
@@ -91,8 +95,6 @@ def run_auction(asset_id):
         residual_assigned += is_first_eligible
 
     # 8. Reveal results
-    clear_price = clearing_price.reveal() // 2
-    clear_vol = max_vol.reveal()
 
     print_ln("Asset %s Results:", asset_id)
     print_ln("Clearing Price: %s", clear_price)
