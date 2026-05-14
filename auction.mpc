@@ -3,10 +3,9 @@
 N_PARTIES = 3
 N_ASSETS = 3
 N_ORDERS = 10
-MAX_PRICE = 500 # Discrete price ladder max
+MAX_PRICE = 220
 
 def run_auction(asset_id):
-    # Arrays to hold secret orders: [price, qty]
     bids_p = sint.Array(N_PARTIES * N_ORDERS)
     bids_q = sint.Array(N_PARTIES * N_ORDERS)
     asks_p = sint.Array(N_PARTIES * N_ORDERS)
@@ -30,38 +29,77 @@ def run_auction(asset_id):
     for p in range(1, MAX_PRICE + 1):
         demand = sint(0)
         supply = sint(0)
-        
-        # Calculate D(p)
+
         for i in range(N_PARTIES * N_ORDERS):
             is_valid_bid = bids_p[i] >= p
             demand += is_valid_bid * bids_q[i]
-            
-        # Calculate S(p)
+
         for i in range(N_PARTIES * N_ORDERS):
             is_valid_ask = (asks_p[i] <= p) * (asks_p[i] > 0)
             supply += is_valid_ask * asks_q[i]
-            
-        # V(p) = min(D(p), S(p))
+
         vol = (demand < supply).if_else(demand, supply)
-        
-        # Update logic for maximum volume, these are all based of True/False
+
         is_new_max = vol > max_vol
         is_equal_max = vol == max_vol
-        
+
         max_vol = is_new_max.if_else(vol, max_vol)
         best_p_low = is_new_max.if_else(p, best_p_low)
-        best_p_high = (is_new_max + is_equal_max).if_else(p, best_p_high)
+        best_p_high = is_new_max.if_else(p, is_equal_max.if_else(p, best_p_high))
 
-    # Midpoint tie-break
-    clearing_price = (best_p_low + best_p_high)
-    
-    # 3. Reveal Output
-    # ONLY NON-SECRETS CLEARING PRICE & VOLUME, FILLS
+    # Midpoint tie-break: p* = (p_low + p_high) / 2
+    clearing_price = best_p_low + best_p_high
+
+    # 3. Determine eligible orders at clearing price (without modifying original arrays)
+    bids_eligible = sint.Array(N_PARTIES * N_ORDERS)
+    asks_eligible = sint.Array(N_PARTIES * N_ORDERS)
+
+    for i in range(N_PARTIES * N_ORDERS):
+        bids_eligible[i] = bids_p[i] >= clearing_price
+        asks_eligible[i] = (asks_p[i] <= clearing_price) * (asks_p[i] > 0)
+
+    # 4. Calculate total quantities (secret, used for pro-rata)
+    total_bid_qty = sint(0)
+    total_ask_qty = sint(0)
+
+    for i in range(N_PARTIES * N_ORDERS):
+        total_bid_qty += bids_eligible[i] * bids_q[i]
+        total_ask_qty += asks_eligible[i] * asks_q[i]
+
+    # 5. Determine which side is rationed (bids_rationed = 1 if bids > asks, else 0)
+    bids_rationed = total_bid_qty > total_ask_qty
+
+    # Reveal only the rationed side total (one reveal minimizes messages)
+    rationed_total = (bids_rationed * total_bid_qty + (1 - bids_rationed) * total_ask_qty).reveal()
+
+    # 6. Pro-rata allocation: fill_i = floor(q_i * V* / rationed_total)
+    fills = sint.Array(N_PARTIES * N_ORDERS)
+    total_allocated = sint(0)
+
+    for i in range(N_PARTIES * N_ORDERS):
+        is_rationed = bids_rationed * bids_eligible[i] + (1 - bids_rationed) * asks_eligible[i]
+        qty = bids_rationed * bids_q[i] + (1 - bids_rationed) * asks_q[i]
+        fills[i] = is_rationed.if_else((qty * max_vol) / cint(rationed_total), sint(0))
+        total_allocated += fills[i]
+
+    # 7. Handle residual: assign to first eligible order on rationed side
+    residual = max_vol - total_allocated
+    residual_assigned = sint(0)
+    for i in range(N_PARTIES * N_ORDERS):
+        is_first_eligible = (1 - residual_assigned) * (bids_rationed * bids_eligible[i] + (1 - bids_rationed) * asks_eligible[i])
+        fills[i] += is_first_eligible * residual
+        residual_assigned += is_first_eligible
+
+    # 8. Reveal results
+    clear_price = clearing_price.reveal() // 2
+    clear_vol = max_vol.reveal()
+
     print_ln("Asset %s Results:", asset_id)
-    print_ln("Clearing Price: %s", clearing_price.reveal()/2)
-    print_ln("Transacted Volume: %s", max_vol.reveal())
-    
-    #NEED TO ADD IN THE PRO-RATA ALLOCATION NOW, THE QUANTITIES MUST REMAIN SECRET
+    print_ln("Clearing Price: %s", clear_price)
+    print_ln("Transacted Volume: %s", clear_vol)
+
+    for i in range(N_PARTIES * N_ORDERS):
+        print_ln("Fill[%s]: %s", i, fills[i].reveal())
 
 for asset in range(N_ASSETS):
     run_auction(asset)
