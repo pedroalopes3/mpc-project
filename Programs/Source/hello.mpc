@@ -1,0 +1,10 @@
+# Lê um inteiro secreto de cada uma das 3 parties [cite: 107]
+s0 = sint.get_input_from(0)
+s1 = sint.get_input_from(1)
+s2 = sint.get_input_from(2)
+
+# Soma os valores mantendo a privacidade 
+resultado = s0 + s1 + s2
+
+# Revela apenas o total final [cite: 92, 110]
+print_ln('A soma secreta total e: %s', resultado.reveal())
