@@ -51,16 +51,16 @@ def run_auction(asset_id):
     clearing_price = best_p_low + best_p_high
 
     # Immediately reveal clearing price and vol once calculated
-    clear_price = clearing_price.reveal() // 2
-    clear_vol = max_vol.reveal()
+    clearing_price_rev = clearing_price.reveal() // 2
+    max_vol_rev = max_vol.reveal()
 
     # 3. Determine eligible orders at clearing price (without modifying original arrays)
     bids_eligible = sint.Array(N_PARTIES * N_ORDERS)
     asks_eligible = sint.Array(N_PARTIES * N_ORDERS)
 
     for i in range(N_PARTIES * N_ORDERS):
-        bids_eligible[i] = bids_p[i] >= clearing_price
-        asks_eligible[i] = (asks_p[i] <= clearing_price) * (asks_p[i] > 0)
+        bids_eligible[i] = bids_p[i] >= clearing_price_rev
+        asks_eligible[i] = (asks_p[i] <= clearing_price_rev) * (asks_p[i] > 0)
 
     # 4. Calculate total quantities (secret, used for pro-rata)
     total_bid_qty = sint(0)
@@ -102,8 +102,8 @@ def run_auction(asset_id):
     # 8. Reveal results
 
     print_ln("Asset %s Results:", asset_id)
-    print_ln("Clearing Price: %s", clear_price)
-    print_ln("Transacted Volume: %s", clear_vol)
+    print_ln("Clearing Price: %s", clearing_price_rev)
+    print_ln("Transacted Volume: %s", max_vol_rev)
 
     for i in range(N_PARTIES * N_ORDERS):
         print_ln("Fill[%s]: %s", i, fills[i].reveal())
