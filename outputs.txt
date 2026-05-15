@@ -1,0 +1,133 @@
+════════════════════════════════════════════════════════════
+──── Party 0 output ────
+Using statistical security parameter 40
+Asset 0 Results:
+Clearing Price: 104
+Transacted Volume: 15
+Fill[0]: 0
+Fill[1]: 0
+Fill[2]: 1
+Fill[3]: 1
+Fill[4]: 2
+Fill[5]: 0
+Fill[6]: 1
+Fill[7]: 0
+Fill[8]: 0
+Fill[9]: 0
+Fill[10]: 1
+Fill[11]: 0
+Fill[12]: 1
+Fill[13]: 2
+Fill[14]: 0
+Fill[15]: 1
+Fill[16]: 0
+Fill[17]: 0
+Fill[18]: 0
+Fill[19]: 0
+Fill[20]: 0
+Fill[21]: 0
+Fill[22]: 0
+Fill[23]: 0
+Fill[24]: 1
+Fill[25]: 1
+Fill[26]: 0
+Fill[27]: 0
+Fill[28]: 1
+Fill[29]: 2
+Asset 1 Results:
+Clearing Price: 202
+Transacted Volume: 15
+Fill[0]: 0
+Fill[1]: 0
+Fill[2]: 0
+Fill[3]: 1
+Fill[4]: 1
+Fill[5]: 1
+Fill[6]: 0
+Fill[7]: 1
+Fill[8]: 0
+Fill[9]: 0
+Fill[10]: 1
+Fill[11]: 0
+Fill[12]: 0
+Fill[13]: 1
+Fill[14]: 2
+Fill[15]: 0
+Fill[16]: 1
+Fill[17]: 0
+Fill[18]: 1
+Fill[19]: 1
+Fill[20]: 0
+Fill[21]: 0
+Fill[22]: 1
+Fill[23]: 1
+Fill[24]: 1
+Fill[25]: 0
+Fill[26]: 0
+Fill[27]: 0
+Fill[28]: 0
+Fill[29]: 1
+Asset 2 Results:
+Clearing Price: 52
+Transacted Volume: 15
+Fill[0]: 1
+Fill[1]: 0
+Fill[2]: 0
+Fill[3]: 0
+Fill[4]: 2
+Fill[5]: 1
+Fill[6]: 0
+Fill[7]: 1
+Fill[8]: 0
+Fill[9]: 1
+Fill[10]: 0
+Fill[11]: 0
+Fill[12]: 0
+Fill[13]: 2
+Fill[14]: 0
+Fill[15]: 2
+Fill[16]: 0
+Fill[17]: 1
+Fill[18]: 0
+Fill[19]: 0
+Fill[20]: 1
+Fill[21]: 0
+Fill[22]: 0
+Fill[23]: 1
+Fill[24]: 0
+Fill[25]: 1
+Fill[26]: 1
+Fill[27]: 0
+Fill[28]: 0
+Fill[29]: 0
+The following benchmarks are including preprocessing (offline phase).
+Time = 12596.1 seconds
+Data sent = 544478 MB in ~545983 rounds (party 0 only; use '-v' for more details)
+Global data sent = 1.63209e+06 MB (all parties)
+This program might benefit from some protocol options.
+Consider adding the following at the beginning of your code:
+        program.use_edabit(True)
+
+──── Party 1 output ────
+Using statistical security parameter 40
+The following benchmarks are including preprocessing (offline phase).
+Time = 12596.1 seconds
+Data sent = 543808 MB in ~456050 rounds (party 1 only; use '-v' for more details)
+Global data sent = 1.63209e+06 MB (all parties)
+This program might benefit from some protocol options.
+Consider adding the following at the beginning of your code:
+        program.use_edabit(True)
+
+──── Party 2 output ────
+Using statistical security parameter 40
+The following benchmarks are including preprocessing (offline phase).
+Time = 12596.1 seconds
+Data sent = 543808 MB in ~428127 rounds (party 2 only; use '-v' for more details)
+Global data sent = 1.63209e+06 MB (all parties)
+This program might benefit from some protocol options.
+Consider adding the following at the beginning of your code:
+        program.use_edabit(True)
+
+════════════════════════════════════════════════════════════
+Exit codes: party0=0  party1=0  party2=0
+Wall-clock: 12596293 ms

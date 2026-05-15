@@ -75,6 +75,9 @@ def run_auction(asset_id):
 
     # Reveal only the rationed side total (one reveal minimizes messages)
     rationed_total = (bids_rationed * total_bid_qty + (1 - bids_rationed) * total_ask_qty).reveal()
+    
+    # NEW: Prevent Division by Zero. If total is 0, make it 1 (the numerator max_vol will be 0 anyway).
+    safe_rationed_total = rationed_total + (rationed_total == 0)
 
     # 6. Pro-rata allocation: fill_i = floor(q_i * V* / rationed_total)
     fills = sint.Array(N_PARTIES * N_ORDERS)
@@ -83,7 +86,9 @@ def run_auction(asset_id):
     for i in range(N_PARTIES * N_ORDERS):
         is_rationed = bids_rationed * bids_eligible[i] + (1 - bids_rationed) * asks_eligible[i]
         qty = bids_rationed * bids_q[i] + (1 - bids_rationed) * asks_q[i]
-        fills[i] = is_rationed.if_else((qty * max_vol) / cint(rationed_total), sint(0))
+        
+        # CHANGED: Use safe_rationed_total instead of cint(rationed_total)
+        fills[i] = is_rationed.if_else((qty * max_vol) / safe_rationed_total, sint(0))
         total_allocated += fills[i]
 
     # 7. Handle residual: assign to first eligible order on rationed side
