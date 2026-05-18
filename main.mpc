@@ -8,6 +8,10 @@ for i in range(10):
     party1_input = sint.get_input_from(1)
     party2_input = sint.get_input_from(2)
 
+    if i != 4:
+        i+=1
+        continue
+
     public_party0_input = party0_input.reveal()
     public_party1_input = party1_input.reveal()
     public_party2_input = party2_input.reveal()

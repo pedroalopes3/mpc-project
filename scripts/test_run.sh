@@ -38,17 +38,17 @@ start_ts=$(python3 -c "import time; print(int(time.time()*1000))")
 # follow progress in real time.  Parties 1 & 2 go silently to files —
 # their private print_ln_to() results are shown at the end.
 docker compose exec -T party0 bash -lc \
-  "cd /mp-spdz && replicated-ring-party.x -N $nparties -p 0 -ip Config/IPs -IF Inputs/Input $prog" \
+  "cd /mp-spdz && ./mascot-party.x -N $nparties -p 0 -ip Config/IPs -IF Inputs/Input $prog" \
   2>&1 | tee "$logdir/party0.log" &
 p0=$!
 
 docker compose exec -T party1 bash -lc \
-  "cd /mp-spdz && replicated-ring-party.x -N $nparties -p 1 -ip Config/IPs -IF Inputs/Input $prog" \
+  "cd /mp-spdz && ./mascot-party.x -N $nparties -p 1 -ip Config/IPs -IF Inputs/Input $prog" \
   > "$logdir/party1.log" 2>&1 &
 p1=$!
 
 docker compose exec -T party2 bash -lc \
-  "cd /mp-spdz && replicated-ring-party.x -N $nparties -p 2 -ip Config/IPs -IF Inputs/Input $prog" \
+  "cd /mp-spdz && ./mascot-party.x -N $nparties -p 2 -ip Config/IPs -IF Inputs/Input $prog" \
   > "$logdir/party2.log" 2>&1 &
 p2=$!
 

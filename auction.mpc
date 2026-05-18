@@ -105,8 +105,8 @@ def run_auction(asset_id):
     print_ln("Clearing Price: %s", clearing_price_rev)
     print_ln("Transacted Volume: %s", max_vol_rev)
 
-    for i in range(N_PARTIES * N_ORDERS):
-        print_ln("Fill[%s]: %s", i, fills[i].reveal())
+    #for i in range(N_PARTIES * N_ORDERS):
+    #    print_ln("Fill[%s]: %s", i, fills[i].reveal())
 
 for asset in range(N_ASSETS):
     run_auction(asset)
