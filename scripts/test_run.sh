@@ -29,7 +29,7 @@ docker compose exec -T party0 bash -lc "
 logdir=$(mktemp -d)
 trap 'rm -rf "$logdir"' EXIT
 
-echo "==> Running $prog on mascot ..."
+echo "==> Running $prog..."
 start_ts=$(python3 -c "import time; print(int(time.time()*1000))")
 
 # Party 0 uses `tee` so its output streams live to the terminal AND to
@@ -37,18 +37,21 @@ start_ts=$(python3 -c "import time; print(int(time.time()*1000))")
 # (clearing prices, "=== Auction for ... ===" headers), so you can
 # follow progress in real time.  Parties 1 & 2 go silently to files —
 # their private print_ln_to() results are shown at the end.
+
+batches=1000
+
 docker compose exec -T party0 bash -lc \
-  "cd /mp-spdz && ./replicated-ring-party.x -N $nparties -p 0 -ip Config/IPs -IF Inputs/Input $prog" \
+  "cd /mp-spdz && ./shamir-party.x -N $nparties -p 0 -ip Config/IPs -IF Inputs/Input --batch-size $batches $prog" \
   2>&1 | tee "$logdir/party0.log" &
 p0=$!
 
 docker compose exec -T party1 bash -lc \
-  "cd /mp-spdz && ./replicated-ring-party.x -N $nparties -p 1 -ip Config/IPs -IF Inputs/Input $prog" \
+  "cd /mp-spdz && ./shamir-party.x -N $nparties -p 1 -ip Config/IPs -IF Inputs/Input --batch-size $batches $prog" \
   > "$logdir/party1.log" 2>&1 &
 p1=$!
 
 docker compose exec -T party2 bash -lc \
-  "cd /mp-spdz && ./replicated-ring-party.x -N $nparties -p 2 -ip Config/IPs -IF Inputs/Input $prog" \
+  "cd /mp-spdz && ./shamir-party.x -N $nparties -p 2 -ip Config/IPs -IF Inputs/Input --batch-size $batches $prog" \
   > "$logdir/party2.log" 2>&1 &
 p2=$!
 
