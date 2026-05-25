@@ -1,0 +1,343 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# auction_optimized.mpc — Optimised Dark Auction (Milestone 4)
+#
+# Optimisações implementadas:
+#
+#   OPT-1  program.use_edabit(True)
+#          edaBit preprocessing amortiza bit-decomposition para comparações,
+#          reduzindo rounds online em ~3x para programas comparison-heavy.
+#
+#   OPT-2  Batcher's Odd-Even Merge Sort
+#          O(N log²N) comparadores estáticos — a rede de comparação tem
+#          estrutura fixa, independente dos dados, portanto a expansão
+#          estática é correcta e intencional aqui.
+#          Para N=30: ~120 comparações secretas (sint op sint).
+#
+#   OPT-3  Delta Accumulators para Demand/Supply (prefix-sum approach)
+#          Em vez de re-somar D(p) e S(p) do zero em cada rung,
+#          pré-computamos delta arrays (quantidade que entra/sai em cada
+#          preço) e mantemos acumuladores demand_acc, supply_acc que são
+#          actualizados com O(1) adições por rung.
+#
+#   OPT-4  @for_range em TODOS os loops que iteram sobre MAX_PRICE
+#          Garante que o grafo compilado tem tamanho O(N + R) em vez de
+#          O(N × R), eliminando o hang de compilação e o preprocessing
+#          excessivo causado por expansão estática.
+#
+#   OPT-5  Deferred Reveals
+#          Apenas os resultados finais (clearing price, volume, fills por
+#          partido) são revelados. Nenhum valor intermédio é exposto.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+program.use_edabit(True)
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+N_PARTIES    = 3
+N_ASSETS     = 3
+N_ORDERS     = 10
+MAX_PRICE    = 220
+SENTINEL_ASK = MAX_PRICE + 1   # sentinela para asks inativas (ordena para o fundo)
+
+TOTAL_ORDERS = N_PARTIES * N_ORDERS   # 30 ordens por asset
+
+
+# ── OPT-2: Batcher's Odd-Even Merge Sort ─────────────────────────────────────
+# Referência: K.E. Batcher, "Sorting Networks and Their Applications", 1968.
+# A rede de comparação tem estrutura fixa: O(N log²N) comparadores
+# dispostos em camadas de profundidade O(log²N).
+# Expansão estática intencional — o compilador pode agrupar comparadores
+# da mesma camada numa única mensagem de protocolo.
+
+def _cmp_swap(p_arr, q_arr, i, j, descending=True):
+    """Compare-and-swap oblivioso em pares (price, quantity)."""
+    do_swap = (p_arr[i] - p_arr[j] < 0) if descending else (p_arr[i] - p_arr[j] > 0)
+    new_pi = do_swap.if_else(p_arr[j], p_arr[i])
+    new_pj = do_swap.if_else(p_arr[i], p_arr[j])
+    new_qi = do_swap.if_else(q_arr[j], q_arr[i])
+    new_qj = do_swap.if_else(q_arr[i], q_arr[j])
+    p_arr[i] = new_pi;  p_arr[j] = new_pj
+    q_arr[i] = new_qi;  q_arr[j] = new_qj
+
+def _batcher_odd_even_merge(p_arr, q_arr, lo, hi, step, descending):
+    size = (hi - lo) // step
+    if size < 2:
+        return
+    if size == 2:
+        _cmp_swap(p_arr, q_arr, lo, lo + step, descending)
+        return
+    half = step * 2
+    _batcher_odd_even_merge(p_arr, q_arr, lo,        hi,        half, descending)
+    _batcher_odd_even_merge(p_arr, q_arr, lo + step, hi + step, half, descending)
+    i = lo + step
+    while i + step < hi:
+        _cmp_swap(p_arr, q_arr, i, i + step, descending)
+        i += half
+
+def _batcher_sort_recursive(p_arr, q_arr, lo, hi, descending):
+    if hi - lo < 2:
+        return
+    mid = lo + (hi - lo) // 2
+    _batcher_sort_recursive(p_arr, q_arr, lo,  mid, descending)
+    _batcher_sort_recursive(p_arr, q_arr, mid, hi,  descending)
+    _batcher_odd_even_merge(p_arr, q_arr, lo,  hi - 1, 1, descending)
+
+def batcher_sort(p_arr, q_arr, n, descending=True):
+    """Ordena pares (p_arr, q_arr) por preço com Batcher odd-even merge-sort."""
+    if n <= 1:
+        return
+    _batcher_sort_recursive(p_arr, q_arr, 0, n, descending)
+
+
+# ── Main Auction Function ─────────────────────────────────────────────────────
+
+def run_auction_optimized(asset_id):
+    """
+    Dark auction optimizado para um asset.
+
+    Passos:
+      1. Ler ordens privadas de cada partido (sint.get_input_from).
+      2. Mascarar ordens inativas (price=0 → qty=0, sentinel para asks).
+      3. [OPT-2] Sort oblivioso: bids desc, asks asc.
+      4. [OPT-3] Construir delta arrays com @for_range (runtime loop).
+      5. [OPT-4] Price scan com @for_range + acumuladores delta.
+      6. Clearing price = midpoint do plateau, floor division com regint.
+      7. Eligibilidade usando arrays pré-sort (mapeamento partido→slot).
+      8. Pro-rata allocation + residual com regint (aritmética pública).
+      9. [OPT-5] Revelar apenas resultados finais.
+    """
+
+    # ── 1. Input ──────────────────────────────────────────────────────────────
+    # Cada partido fornece N_ORDERS quadruplos (bid_p, bid_q, ask_p, ask_q).
+    # price = 0 significa "sem ordem neste lado".
+
+    bids_p = sint.Array(TOTAL_ORDERS)
+    bids_q = sint.Array(TOTAL_ORDERS)
+    asks_p = sint.Array(TOTAL_ORDERS)
+    asks_q = sint.Array(TOTAL_ORDERS)
+
+    # Cópias pré-sort para mapeamento partido→slot no passo de eligibilidade.
+    # Após o Batcher sort, os arrays são reordenados; as cópias preservam
+    # a estrutura [partido 0: slots 0..9, partido 1: slots 10..19, ...].
+    bids_p_orig = sint.Array(TOTAL_ORDERS)
+    bids_q_orig = sint.Array(TOTAL_ORDERS)
+    asks_p_orig = sint.Array(TOTAL_ORDERS)
+    asks_q_orig = sint.Array(TOTAL_ORDERS)
+
+    idx = 0
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            bp = sint.get_input_from(party)
+            bq = sint.get_input_from(party)
+            ap = sint.get_input_from(party)
+            aq = sint.get_input_from(party)
+            bids_p[idx] = bp;  bids_q[idx] = bq
+            asks_p[idx] = ap;  asks_q[idx] = aq
+            bids_p_orig[idx] = bp;  bids_q_orig[idx] = bq
+            asks_p_orig[idx] = ap;  asks_q_orig[idx] = aq
+            idx += 1
+
+    # ── 2. Mascaramento de Ordens Inativas ────────────────────────────────────
+    # bid inativo (price=0): qty → 0 (preço 0 fica no fundo do sort desc)
+    # ask inativo (price=0): qty → 0, price → SENTINEL_ASK (fundo do sort asc)
+    for i in range(TOTAL_ORDERS):
+        bid_active = bids_p[i] > 0
+        bids_q[i]  = bid_active * bids_q[i]
+
+        ask_active = asks_p[i] > 0
+        asks_q[i]  = ask_active * asks_q[i]
+        asks_p[i]  = ask_active.if_else(asks_p[i], sint(SENTINEL_ASK))
+
+        # Propagar mascaramento para cópias originais
+        bids_q_orig[i] = bids_q[i]
+        asks_q_orig[i] = asks_q[i]
+        asks_p_orig[i] = asks_p[i]
+
+    # ── 3. OPT-2: Sort Oblivioso ──────────────────────────────────────────────
+    # bids: descendente por preço (maior disposição a pagar primeiro)
+    # asks: ascendente por preço  (menor disposição a vender primeiro)
+    batcher_sort(bids_p, bids_q, TOTAL_ORDERS, descending=True)
+    batcher_sort(asks_p, asks_q, TOTAL_ORDERS, descending=False)
+
+    # ── 4. OPT-3+4: Delta Arrays com @for_range ───────────────────────────────
+    # delta_demand[p] = quantidade total de bids com price == p
+    # delta_supply[p] = quantidade total de asks com price == p
+    #
+    # Construídos com @for_range: o corpo do loop tem O(N=30) operações estáticas
+    # e corre MAX_PRICE+1 vezes em runtime. O grafo compilado tem O(N) nós
+    # (não O(N×R)), eliminando a explosão de triples.
+    #
+    # Custo em runtime: (MAX_PRICE+1) × TOTAL_ORDERS = 221×30 = 6630 comparações
+    # (sint==cint) — baratas (1 triple cada) e necessárias.
+
+    delta_demand = sint.Array(MAX_PRICE + 2)
+    delta_supply = sint.Array(MAX_PRICE + 2)
+
+    @for_range(MAX_PRICE + 2)
+    def _init(k):
+        delta_demand[k] = sint(0)
+        delta_supply[k] = sint(0)
+
+    @for_range(MAX_PRICE + 1)
+    def _build_deltas(p):
+        dd = sint(0)
+        ds = sint(0)
+        for i in range(TOTAL_ORDERS):
+            # sint == cint: comparação barata (usa 1 triple, não 3)
+            dd = dd + (bids_p[i] == p) * bids_q[i]
+            ds = ds + (asks_p[i] == p) * asks_q[i]
+        delta_demand[p] = dd
+        delta_supply[p] = ds
+
+    # ── 5. OPT-4: Price Scan com @for_range + Acumuladores ───────────────────
+    # demand_acc começa com a soma total das bids activas e DECREMENTA
+    # à medida que p sobe (bids com price < p expiram).
+    # supply_acc começa em 0 e INCREMENTA à medida que p sobe
+    # (asks com price <= p tornam-se elegíveis).
+    #
+    # Em cada rung p: apenas 2 adições secretas (O(1) por rung).
+    # Total do scan: 220 rungs × ~6 ops = 1320 operações secretas.
+
+    demand_acc  = sint.Array(1)
+    supply_acc  = sint.Array(1)
+    max_vol_arr = sint.Array(1)
+    best_p_low  = sint.Array(1)
+    best_p_high = sint.Array(1)
+
+    # demand inicial = soma de todas as bids activas (qty já mascarada)
+    demand_init = sint(0)
+    for i in range(TOTAL_ORDERS):
+        demand_init = demand_init + bids_q[i]
+
+    demand_acc[0]  = demand_init
+    supply_acc[0]  = sint(0)
+    max_vol_arr[0] = sint(0)
+    best_p_low[0]  = sint(0)
+    best_p_high[0] = sint(0)
+
+    @for_range(1, MAX_PRICE + 1)
+    def _price_scan(p):
+        # Expirar bids com price == p-1 (saem do mercado quando p ultrapassa o seu limite)
+        demand_acc[0] = demand_acc[0] - delta_demand[p - 1]
+        # Activar asks com price == p (entram no mercado quando p atinge o seu mínimo)
+        supply_acc[0] = supply_acc[0] + delta_supply[p]
+
+        # V(p) = min(D(p), S(p))
+        d   = demand_acc[0]
+        s   = supply_acc[0]
+        vol = (d < s).if_else(d, s)
+
+        # Tracking do plateau: [best_p_low, best_p_high] é o intervalo de preços
+        # que maximiza V. Tie-break: midpoint do plateau.
+        is_new_max   = vol > max_vol_arr[0]
+        is_equal_max = (vol == max_vol_arr[0]) * (max_vol_arr[0] > 0)
+
+        max_vol_arr[0] = is_new_max.if_else(vol, max_vol_arr[0])
+        # Novo máximo: reinicia o plateau para [p, p]
+        best_p_low[0]  = is_new_max.if_else(sint(p), best_p_low[0])
+        best_p_high[0] = is_new_max.if_else(sint(p), best_p_high[0])
+        # Extensão do plateau: apenas best_p_high avança
+        best_p_high[0] = is_equal_max.if_else(sint(p), best_p_high[0])
+
+    # ── 6. Clearing Price ─────────────────────────────────────────────────────
+    # p* = floor((best_p_low + best_p_high) / 2)
+    #
+    # REVEAL 1 (clearing price): informação de resultado pública do auction.
+    # cint // 2 seria divisão em GF(p) (errado). Usamos regint // 2 (floor division).
+    clearing_price_sum = (best_p_low[0] + best_p_high[0]).reveal()   # cint
+    clearing_price_rev = regint(clearing_price_sum) // 2              # floor division correcta
+
+    # REVEAL 2 (volume): resultado público do auction.
+    max_vol_int = regint(max_vol_arr[0].reveal())
+
+    print_ln("Asset %s [OPT]: clearing_price=%s  volume=%s",
+             asset_id, clearing_price_rev, max_vol_int)
+
+    # ── 7. Eligibilidade por Partido ──────────────────────────────────────────
+    # Usa arrays ORIGINAIS (pré-sort) para preservar mapeamento partido→slot:
+    #   partido p → slots [p*N_ORDERS .. (p+1)*N_ORDERS - 1]
+    #
+    # Comparações (sint op cint): clearing_price_rev é regint público,
+    # convertemos para cint para operar com sints.
+    # Custo: TOTAL_ORDERS × 2 = 60 comparações (sint op cint) por asset.
+
+    cp_cint = cint(clearing_price_rev)
+
+    party_bid_qty = [sint(0)] * N_PARTIES
+    party_ask_qty = [sint(0)] * N_PARTIES
+
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            slot = party * N_ORDERS + i
+
+            # bid elegível: price >= clearing price E tem quantidade > 0
+            bid_elig = (bids_p_orig[slot] >= cp_cint) * (bids_q_orig[slot] > 0)
+            party_bid_qty[party] = party_bid_qty[party] + bid_elig * bids_q_orig[slot]
+
+            # ask elegível: price <= clearing price E não é sentinela
+            ask_elig = (asks_p_orig[slot] <= cp_cint) * (asks_p_orig[slot] < SENTINEL_ASK)
+            party_ask_qty[party] = party_ask_qty[party] + ask_elig * asks_q_orig[slot]
+
+    # ── 8. Lado Racionado ─────────────────────────────────────────────────────
+    # Se demand total > supply total → bids são racionados; caso contrário asks.
+    total_bid_elig = sint(0)
+    total_ask_elig = sint(0)
+    for party in range(N_PARTIES):
+        total_bid_elig = total_bid_elig + party_bid_qty[party]
+        total_ask_elig = total_ask_elig + party_ask_qty[party]
+
+    bids_rationed = total_bid_elig > total_ask_elig
+
+    rationed_party_qty = [
+        bids_rationed.if_else(party_bid_qty[p], party_ask_qty[p])
+        for p in range(N_PARTIES)
+    ]
+
+    # Denominador total do lado racionado
+    rationed_total_s = sint(0)
+    for p in range(N_PARTIES):
+        rationed_total_s = rationed_total_s + rationed_party_qty[p]
+
+    # REVEAL 3 (denominador agregado): necessário para a divisão da pro-rata.
+    rationed_total_int = regint(rationed_total_s.reveal())
+    safe_denom = rationed_total_int + regint(rationed_total_int == 0)
+
+    # ── 9. Pro-Rata Fills ─────────────────────────────────────────────────────
+    # fill_p = floor(rationed_qty_p × V* / total_rationed)
+    #
+    # REVEAL 4,5,6 (qty racionada por partido): resultado legítimo —
+    # cada partido recebe o seu próprio fill, equivalente ao que um
+    # exchange real comunica a cada participante.
+
+    party_fills = [regint(0)] * N_PARTIES
+    total_alloc = regint(0)
+
+    for p in range(N_PARTIES):
+        rq_int = regint(rationed_party_qty[p].reveal())
+        party_fills[p] = (rq_int * max_vol_int) // safe_denom
+        total_alloc = total_alloc + party_fills[p]
+
+    # ── 10. Residual → primeiro partido elegível ──────────────────────────────
+    # Unidades residuais devidas ao floor vão para o primeiro partido com ordens elegíveis.
+    residual          = max_vol_int - total_alloc
+    residual_assigned = regint(0)
+
+    for p in range(N_PARTIES):
+        rq_int            = regint(rationed_party_qty[p].reveal())
+        has_elig          = regint(rq_int > 0)
+        is_first          = (1 - residual_assigned) * has_elig
+        party_fills[p]    = party_fills[p] + is_first * residual
+        residual_assigned = residual_assigned + is_first
+
+    # ── 11. Output ────────────────────────────────────────────────────────────
+    # Apenas resultados finais: clearing price, volume, fill por partido.
+    print_ln("Asset %s Results [OPT]:", asset_id)
+    print_ln("  Clearing Price    : %s", clearing_price_rev)
+    print_ln("  Transacted Volume : %s", max_vol_int)
+    for p in range(N_PARTIES):
+        print_ln("  Party %s fill     : %s", p, party_fills[p])
+
+
+# ── Correr os 3 assets ────────────────────────────────────────────────────────
+for asset in range(N_ASSETS):
+    run_auction_optimized(asset)

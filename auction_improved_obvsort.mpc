@@ -26,7 +26,7 @@ program.use_edabit(True)
 # ── Auction Parameters ────────────────────────────────────────────────────────
 N_PARTIES  = 3
 N_ASSETS   = 3     # BTC, ETH, SOL
-N_ORDERS   = 10    # orders per party per asset (each party's clients)
+N_ORDERS   = 4    # orders per party per asset (each party's clients)
 MAX_PRICE  = 220   # price ladder ceiling (integer price rungs)
 
 TOTAL_ORDERS = N_PARTIES * N_ORDERS   # 30 order slots per asset
