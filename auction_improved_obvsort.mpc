@@ -253,6 +253,14 @@ def run_auction(asset_id):
         party_fills[p] = numerator // safe_denom               # sint // sint
         total_alloc   += party_fills[p]
 
+
+
+    for p in range(N_PARTIES):
+
+        cint_division = max_vol_rev // safe_denom_cint          #cint // cint
+        party_fills[p] = rationed_party_qty[p] * cint_division  # sint * cint
+        total_alloc   += party_fills[p]
+
     # ── 8. Residual Allocation ────────────────────────────────────────────────
     # Floor-rounding may leave up to (N_PARTIES - 1) unallocated units.
     # Assign each residual unit to the first party that has eligible volume
