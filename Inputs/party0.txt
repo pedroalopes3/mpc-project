@@ -6,7 +6,7 @@
 # ── BTC orders ──
 # bid_price  bid_qty  ask_price  ask_qty
            0         0         103         2
-         106         5           0         0.çç-
+         106         5           0         0
           85         1         101         2
           91         5         108         2
           85         2         117         4
