@@ -1,5 +1,10 @@
 print("Hello World!")
 
+sfix.round_nearest = True
+test = sfix(2.001)
+test_sint = sint(test-cfix(0.5))
+print_ln("TEST: %s", test_sint.reveal())
+
 
 for i in range(10):
     # inputs das bids para cada party 
@@ -8,6 +13,8 @@ for i in range(10):
     party2_input = sint.get_input_from(2)
 
     
+
+
     public_party0_input = party0_input.reveal()
     public_party1_input = party1_input.reveal()
     public_party2_input = party2_input.reveal()
@@ -20,7 +27,7 @@ for i in range(10):
     diference = secret_sum.reveal() - public_sum
 
     # revela a soma  
-    print_ln("\n\n||||||||||||||||||||||||||||||Round %s||||||||||||||||||||||||||||||||||||\nThe secret sum is: %s, the public one: %s, difference: %s\nParty 0: %s | Party 1: %s | Party 2: %s\n\n\n", i,secret_sum.reveal(), public_sum, diference, public_party0_input, public_party1_input, public_party2_input)
+    #print_ln("\n\n||||||||||||||||||||||||||||||Round %s||||||||||||||||||||||||||||||||||||\nThe secret sum is: %s, the public one: %s, difference: %s\nParty 0: %s | Party 1: %s | Party 2: %s\n\n\n", i,secret_sum.reveal(), public_sum, diference, public_party0_input, public_party1_input, public_party2_input)
 
 
 

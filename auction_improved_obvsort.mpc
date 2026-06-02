@@ -203,11 +203,26 @@ def run_auction(asset_id):
     party_fills = [sint(0)] * N_PARTIES
     total_alloc = sint(0)
 
-    for p in range(N_PARTIES):
-        numerator      = rationed_party_qty[p] * max_vol_rev   # sint * cint = sint
-        party_fills[p] = numerator // safe_denom               # sint // sint
-        total_alloc   += party_fills[p]
+    #for p in range(N_PARTIES):
+    #    numerator      = rationed_party_qty[p] * max_vol_rev   # sint * cint = sint
+    #    party_fills[p] = numerator // safe_denom               # sint // sint
+    #    total_alloc   += party_fills[p]
 
+    #to avoid the sint/sint we revealed the rationed eligible sum (which should't be too much of a problem)
+    sfix.round_nearest = True   #we turned round nearest so we can cast the sfix into a sint (before it was stochastic rounding)
+
+    public_ratio = cfix(max_vol_rev) / cfix(safe_denom_cint)    #revealed max vol / rationed eligible sum (cfix)
+    shift = cfix(0.5)
+    epsilon = cfix(0.0001)
+
+    for p in range(N_PARTIES):
+        fill_float = rationed_party_qty[p] * public_ratio   #this is only a sint * cfix, should be much better
+        
+        party_fills[p] = sint(fill_float - shift + epsilon) #the epsilon is to account for the bit representations (7.9999999 instead of 8) (floor rounding would give 7)
+        
+        total_alloc += party_fills[p]
+
+    sfix.round_nearest = False
 
     # ── 8. Residual Allocation ────────────────────────────────────────────────
     # Floor-rounding may leave up to (N_PARTIES - 1) unallocated units.

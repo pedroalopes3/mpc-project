@@ -92,6 +92,7 @@ def run_auction(asset_id):
             bq = sint.get_input_from(party)
             ap = sint.get_input_from(party)
             aq = sint.get_input_from(party)
+
             bids_p[idx] = bp;  bids_q[idx] = bq
             asks_p[idx] = ap;  asks_q[idx] = aq
             bids_p_orig[idx] = bp;  bids_q_orig[idx] = bq
