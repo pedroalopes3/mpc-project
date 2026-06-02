@@ -180,33 +180,12 @@ def run_auction(asset_id):
     # Guard against zero denominator (no eligible orders on either side).
     safe_denom_cint = rationed_total + cint(rationed_total == 0)
 
-    # Promote cint -> sint for the // operator.
-    # MP-SPDZ's // requires both operands to be sint.
-    # sint(cint_val) creates a secret-sharing of a public value — all parties
-    # hold consistent shares, so this introduces no new secrecy.
 
-    safe_denom = sint(safe_denom_cint)
 
     # ── 7. Party-Level Pro-Rata Fills ─────────────────────────────────────────
-    # fill_p = floor(party_rationed_qty[p] * V* / sum_j party_rationed_qty[j])
-    #
-    # Example (project statement, Section 2.4):
-    #   Clearing price 104.5, V* = 8.
-    #   Party eligible quantities (bid side, rationed): 3, 5, 2 -> total = 10.
-    #   Fills: floor(3*8/10)=2, floor(5*8/10)=4, floor(2*8/10)=1 -> total=7.
-    #   Residual = 1 -> assigned to party 0 -> final fills = (3, 4, 1).
-    #
-    # Numerator: rationed_party_qty[p] (sint) * max_vol_rev (cint) = sint
-    # Denominator: safe_denom (sint, promoted from public cint)
-    # sint // sint: uses MP-SPDZ's integer division protocol
 
     party_fills = [sint(0)] * N_PARTIES
     total_alloc = sint(0)
-
-    #for p in range(N_PARTIES):
-    #    numerator      = rationed_party_qty[p] * max_vol_rev   # sint * cint = sint
-    #    party_fills[p] = numerator // safe_denom               # sint // sint
-    #    total_alloc   += party_fills[p]
 
     #to avoid the sint/sint we revealed the rationed eligible sum (which should't be too much of a problem)
     sfix.round_nearest = True   #we turned round nearest so we can cast the sfix into a sint (before it was stochastic rounding)
@@ -226,24 +205,28 @@ def run_auction(asset_id):
 
     # ── 8. Residual Allocation ────────────────────────────────────────────────
     # Floor-rounding may leave up to (N_PARTIES - 1) unallocated units.
-    # Assign each residual unit to the first party that has eligible volume
-    # on the rationed side (standard dark-pool convention).
 
-    residual          = max_vol - total_alloc
-    residual_assigned = sint(0)
+
+    # Round-robin, with checks to see if the party wants more than 1
+    residual_left = max_vol - total_alloc
 
     for p in range(N_PARTIES):
-        has_eligible = rationed_party_qty[p] > 0
-        is_first     = (1 - residual_assigned) * has_eligible
-        party_fills[p]    += is_first * residual
-        residual_assigned  += is_first
+        # 1. Does this party actually have unfilled demand?
+        # (Compare their current base fill against their max eligible quantity)
+        wants_more = party_fills[p] < rationed_party_qty[p]  # sint boolean
+        
+        # 2. Do we still have residual units left to give out?
+        has_residuals = residual_left > 0                    # sint boolean
+        
+        # 3. Party gets EXACTLY 1 unit if both conditions are true
+        gets_unit = wants_more * has_residuals               # 1 or 0
+        
+        # 4. Apply the unit and decrement the pool
+        party_fills[p] += gets_unit
+        residual_left  -= gets_unit
 
+    
     # ── 9. Output ─────────────────────────────────────────────────────────────
-    # REVEAL 4, 5, 6 — party_fills[0..2]:
-    #   Each party's fill is a public result of the auction. The fill tells
-    #   each distributor how many units its clients collectively receive.
-    #   Each party then privately splits its fill among its own clients.
-
     print_ln("Asset %s Results:", asset_id)
     print_ln("  Clearing Price    : %s", clearing_price_rev)
     print_ln("  Transacted Volume : %s", max_vol_rev)
