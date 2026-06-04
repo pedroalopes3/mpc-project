@@ -1,5 +1,3 @@
-program.use_edabit(True) 
-
 # ── Auction Parameters ────────────────────────────────────────────────────────
 N_PARTIES = 3
 N_ASSETS = 3  

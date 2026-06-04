@@ -1,0 +1,294 @@
+# ── Auction Parameters ────────────────────────────────────────────────────────
+N_PARTIES    = 3
+N_ASSETS     = 3
+N_ORDERS     = 10
+MAX_PRICE    = 1000
+TOTAL_ORDERS = N_PARTIES * N_ORDERS   # 30 per-asset orders
+N_ROWS       = 2 * TOTAL_ORDERS       # 60 real rows in sort matrix
+
+# Pad to the next power of 2 for the bitonic sort
+N_PADDED = 1
+while N_PADDED < N_ROWS:
+    N_PADDED <<= 1                    # = 64
+SENTINEL_PRICE = MAX_PRICE + 1        # sentinel rows sort to end (ascending)
+
+
+# ── Sorting helpers: Batcher's bitonic sort ───────────────────────────────────
+
+def _cswap(mat, i, j, asc):
+    """
+    Oblivious compare-and-swap of rows mat[i] and mat[j] (in-place list
+    assignment — no MP-SPDZ Array involved).
+
+    asc=True  → ensure mat[i][0] <= mat[j][0]  (swap if i > j)
+    asc=False → ensure mat[i][0] >= mat[j][0]  (swap if i < j)
+
+    [OPT3]  Each row element is sint(size=N_ASSETS).  The comparison produces
+    N_ASSETS independent bits (one per SIMD lane / asset); the two
+    c.if_else() writes swap each lane independently.  All N_ASSETS auctions
+    therefore exchange data simultaneously in a single gate evaluation.
+    """
+    c = (mat[i][0] > mat[j][0]) if asc else (mat[j][0] > mat[i][0])
+    for col in range(3):
+        a = mat[i][col]
+        b = mat[j][col]
+        mat[i][col] = c.if_else(b, a)
+        mat[j][col] = c.if_else(a, b)
+
+
+def bitonic_sort(mat):
+    """
+    Sort mat (Python list of N_PADDED rows) ascending by column 0.
+    len(mat) must be a power of 2.
+
+    [OPT2]  Batcher's bitonic network: O(N log^2 N) compare-and-swap pairs,
+            O(log^2 N) parallel depth — same asymptotic class as the
+            baseline's order_matrix.sort() (Batcher's odd-even merge sort).
+
+    [OPT3]  Uses _cswap, which is SIMD-aware: every compare-and-swap
+            processes N_ASSETS independent auctions simultaneously.
+
+    FIX vs. previous version:
+            sint.Matrix.sort() cannot hold sint(size=N_ASSETS) elements
+            because the Matrix type enforces size=1 per entry.  Replacing
+            the matrix with a Python list-of-lists removes that restriction
+            and makes _cswap the sole place where element type matters.
+
+    Bitonic invariant: for outer step k and inner step j, pair (i, i^j) is
+      sorted ascending  when (i & k) == 0, and descending when (i & k) != 0.
+    In the final pass k == n:  for all i in [0, n), (i & n) == 0 (since
+      i < n), so every pair sorts ascending → entire array is ascending.
+    """
+    n = len(mat)
+    k = 2
+    while k <= n:
+        j = k >> 1
+        while j >= 1:
+            for i in range(n):
+                l = i ^ j
+                if l > i:
+                    _cswap(mat, i, l, asc=((i & k) == 0))
+            j >>= 1
+        k <<= 1
+
+
+# ── Main auction logic ────────────────────────────────────────────────────────
+
+def run_all_auctions():
+    """
+    Execute sealed-bid double (dark) auctions for ALL N_ASSETS assets in one
+    MPC execution.  Every sint carries N_ASSETS independent values packed as a
+    SIMD register (size=N_ASSETS); one MPC gate processes all auctions at once.
+
+    ┌───────┬──────────────────────────────────────────────────────┬─────────┐
+    │ Tag   │ Optimisation                                          │ Status  │
+    ├───────┼──────────────────────────────────────────────────────┼─────────┤
+    │ OPT1  │ Prefix-sum supply/demand (O(N) scans after sort)     │ PRESENT │
+    │ OPT2  │ Batcher's bitonic sort  O(N log^2 N)                 │ PRESENT │
+    │ OPT3  │ SIMD vectorisation: sint(size=N_ASSETS) throughout   │ NEW     │
+    │ OPT4  │ Reduce reveals: rationed_total kept secret via sfix  │ NEW     │
+    │ OPT5a │ Loop fusion: elig + party aggregation in one pass    │ NEW     │
+    │ OPT5b │ >= replaces == in clearing-price loop                │ NEW     │
+    └───────┴──────────────────────────────────────────────────────┴─────────┘
+
+    Root cause of the previous CompilerError
+    ─────────────────────────────────────────
+    sint.Array(n) and sint.Matrix(r,c) fix the element size at 1 at
+    construction time.  Assigning sint(size=N_ASSETS) into such a container
+    raises 'size mismatch in array assignment'.
+
+    Fixes applied
+    ─────────────
+    • All sint.Array(n) → Python list  (type-agnostic, no size enforcement).
+    • sint.Matrix(r,c)  → Python list-of-lists  (same reason).
+    • order_matrix.sort() → bitonic_sort()  (manual network on Python lists,
+      explicitly SIMD-aware via _cswap; see docstring above).
+    """
+
+    # ── 1. INPUT RETRIEVAL ───────────────────────────────────────────────────
+    # [OPT3] get_input_from(party, size=N_ASSETS) reads N_ASSETS consecutive
+    # values from the party's tape and packs them into one SIMD sint.
+    # Python lists are used; sint.Array would reject size=N_ASSETS elements.
+    #
+    # Tape layout per party (asset-interleaved order):
+    #   for each order i in 0..N_ORDERS-1:
+    #     N_ASSETS bid prices  (asset 0, 1, 2), then bid qtys, ask prices, ask qtys
+    bids_p = [None] * TOTAL_ORDERS
+    bids_q = [None] * TOTAL_ORDERS
+    asks_p = [None] * TOTAL_ORDERS
+    asks_q = [None] * TOTAL_ORDERS
+
+    idx = 0
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            bids_p[idx] = sint.get_input_from(party, size=N_ASSETS)
+            bids_q[idx] = sint.get_input_from(party, size=N_ASSETS)
+            asks_p[idx] = sint.get_input_from(party, size=N_ASSETS)
+            asks_q[idx] = sint.get_input_from(party, size=N_ASSETS)
+            idx += 1
+
+    # ── 2. OBLIVIOUS SORT ────────────────────────────────────────────────────
+    # [OPT2+OPT3] Bitonic sort on a Python list-of-lists of sint(size=N_ASSETS).
+    #
+    # Padding: N_PADDED=64 (power of 2).  Sentinel rows have
+    # price=SENTINEL_PRICE=1001 so they sort to positions 60..63 (the end of
+    # the ascending sequence) and are never accessed by the N_ROWS=60 loops.
+    zero = sint(0,              size=N_ASSETS)
+    sent = sint(SENTINEL_PRICE, size=N_ASSETS)
+
+    # Initialise all rows to sentinel; overwrite the first N_ROWS with real data
+    order_matrix = [[sent, zero, zero] for _ in range(N_PADDED)]
+
+    for i in range(TOTAL_ORDERS):
+        order_matrix[i]              = [bids_p[i], bids_q[i], sint(0, size=N_ASSETS)]
+        order_matrix[TOTAL_ORDERS+i] = [asks_p[i], sint(0, size=N_ASSETS), asks_q[i]]
+
+    bitonic_sort(order_matrix)   # O(N log^2 N), SIMD-parallel per lane [OPT2, OPT3]
+
+    # ── 3. PREFIX-SUM SUPPLY / DEMAND ────────────────────────────────────────
+    # [OPT1 already present] O(N_ROWS) running totals after the sort.
+    # [OPT3] Each addition is a SIMD op over N_ASSETS lanes.
+    # Python lists used instead of sint.Array for same reason as step 1.
+    supply = [None] * N_ROWS
+    demand = [None] * N_ROWS
+
+    running_supply = sint(0, size=N_ASSETS)
+    for i in range(N_ROWS):
+        running_supply = running_supply + order_matrix[i][2]
+        supply[i] = running_supply
+
+    running_demand = sint(0, size=N_ASSETS)
+    for i in range(N_ROWS - 1, -1, -1):
+        running_demand = running_demand + order_matrix[i][1]
+        demand[i] = running_demand
+
+    # ── 4. CLEARING PRICE ────────────────────────────────────────────────────
+    # [OPT5b]  Replace (vol > max_vol, vol == max_vol) with
+    #          (vol > max_vol, vol >= max_vol).
+    #
+    #  Old cost per rung:
+    #    vol > max_vol   1 comparison round
+    #    vol == max_vol  ~2 comparison rounds + AND gate
+    #    3 x if_else     3 multiplications  (nested)
+    #
+    #  New cost per rung:
+    #    vol > max_vol   1 comparison round
+    #    vol >= max_vol  1 comparison round   ← saves ~1 round per rung
+    #    3 x if_else     3 multiplications    ← flat structure, same count
+    #
+    #  Saving: ~60 comparison rounds over N_ROWS=60 rungs.
+    #
+    #  Correctness: is_new_max and the "equal" case are mutually exclusive,
+    #  so best_p_high should update iff vol >= max_vol — one cheap comparison.
+    max_vol     = sint(0,              size=N_ASSETS)
+    best_p_low  = sint(SENTINEL_PRICE, size=N_ASSETS)
+    best_p_high = sint(0,              size=N_ASSETS)
+
+    for i in range(N_ROWS):
+        p   = order_matrix[i][0]
+        vol = (demand[i] < supply[i]).if_else(demand[i], supply[i])
+        vol = vol * (p > 0)                # mask price-0 and sentinel rows
+
+        is_new_max      = vol >  max_vol   # [OPT5b] 1 comparison round
+        is_at_least_max = vol >= max_vol   # [OPT5b] 1 comparison round (was ==: ~2)
+
+        max_vol     = is_new_max.if_else(vol, max_vol)
+        best_p_low  = is_new_max.if_else(p,   best_p_low)
+        best_p_high = is_at_least_max.if_else(p, best_p_high)  # [OPT5b]
+
+    # clearing_price and max_vol are the legitimate public outputs of a dark
+    # auction; their reveals are necessary and unchanged from the baseline.
+    clearing_price_rev = (best_p_low + best_p_high).reveal() // 2  # cint(size=N_ASSETS)
+    max_vol_rev        = max_vol.reveal()                            # cint(size=N_ASSETS)
+
+    for a in range(N_ASSETS):
+        print_ln("Asset %s: clearing_price=%s  volume=%s",
+                 a, clearing_price_rev[a], max_vol_rev[a])
+
+    # ── 5. ELIGIBLE ORDERS + PARTY AGGREGATION (fused) ───────────────────────
+    # [OPT5a]  Baseline steps 4+5 were two separate passes:
+    #   Step 4 — build bids_elig[TOTAL_ORDERS] and asks_elig[TOTAL_ORDERS]
+    #   Step 5 — accumulate party_bid_qty / party_ask_qty from those arrays
+    # Fusing eliminates 2*TOTAL_ORDERS=60 intermediate sint allocations and
+    # one complete array traversal.  Operation count is unchanged.
+    party_bid_qty = [sint(0, size=N_ASSETS) for _ in range(N_PARTIES)]
+    party_ask_qty = [sint(0, size=N_ASSETS) for _ in range(N_PARTIES)]
+
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            slot     = party * N_ORDERS + i
+            bid_elig = bids_p[slot] >= clearing_price_rev                          # sint >= cint
+            ask_elig = (asks_p[slot] <= clearing_price_rev) * (asks_p[slot] > 0)  # sint <= cint
+            party_bid_qty[party] = party_bid_qty[party] + bid_elig * bids_q[slot]
+            party_ask_qty[party] = party_ask_qty[party] + ask_elig * asks_q[slot]
+
+    # ── 6. RATIONED SIDE ─────────────────────────────────────────────────────
+    total_bid_qty = sint(0, size=N_ASSETS)
+    total_ask_qty = sint(0, size=N_ASSETS)
+    for party in range(N_PARTIES):
+        total_bid_qty = total_bid_qty + party_bid_qty[party]
+        total_ask_qty = total_ask_qty + party_ask_qty[party]
+
+    bids_rationed = total_bid_qty > total_ask_qty
+
+    rationed_party_qty = [
+        bids_rationed * party_bid_qty[p] + (1 - bids_rationed) * party_ask_qty[p]
+        for p in range(N_PARTIES)
+    ]
+
+    rationed_total_s = sint(0, size=N_ASSETS)
+    for p in range(N_PARTIES):
+        rationed_total_s = rationed_total_s + rationed_party_qty[p]
+
+    # ── 7. PRO-RATA FILLS  [OPT4: rationed_total never revealed] ─────────────
+    # Baseline revealed rationed_total_s here and used a public denominator.
+    # That discloses the aggregate short-side eligible volume beyond what
+    # clearing_price and max_vol already tell.
+    #
+    # New: zero-denominator guard stays fully secret —
+    #   safe_denom_s = rationed_total_s + (rationed_total_s == 0)
+    # The == comparison returns a secret bit; adding it keeps the denominator
+    # >= 1 with no branch or reveal.
+    #
+    # Pro-rata fills use sfix secret division (ABZS truncation protocol).
+    # cfix(max_vol_rev) remains public (already a legitimate revealed output).
+    # Cost: bounded O(1) extra interactive rounds per party; privacy improves.
+    safe_denom_s = rationed_total_s + (rationed_total_s == 0)
+
+    sfix.round_nearest = True
+
+    party_fills = [sint(0, size=N_ASSETS) for _ in range(N_PARTIES)]
+    total_alloc = sint(0, size=N_ASSETS)
+
+    for p in range(N_PARTIES):
+        fill_sfix = sfix(rationed_party_qty[p]) * cfix(max_vol_rev) / sfix(safe_denom_s)
+        party_fills[p] = sint(fill_sfix)
+        total_alloc = total_alloc + party_fills[p]
+
+    sfix.round_nearest = False
+
+    # ── 8. RESIDUAL ALLOCATION ────────────────────────────────────────────────
+    # Logic unchanged; all arithmetic is SIMD-vectorised throughout [OPT3].
+    residual_left = max_vol - total_alloc   # secret, in [0, N_PARTIES - 1]
+
+    for p in range(N_PARTIES):
+        wants_more    = party_fills[p] < rationed_party_qty[p]
+        has_residuals = residual_left > 0
+        gets_unit     = wants_more * has_residuals
+        party_fills[p] = party_fills[p] + gets_unit
+        residual_left  = residual_left  - gets_unit
+
+    # ── 9. OUTPUT ─────────────────────────────────────────────────────────────
+    # Only final per-party fills are revealed here (the sole remaining secrets).
+    # SIMD lanes are indexed with [a] on the cint returned by .reveal().
+    for a in range(N_ASSETS):
+        print_ln("Asset %s Results:", a)
+        print_ln("  Clearing Price    : %s", clearing_price_rev[a])
+        print_ln("  Transacted Volume : %s", max_vol_rev[a])
+        for p in range(N_PARTIES):
+            fill_rev = party_fills[p].reveal()
+            print_ln("  Party %s fill     : %s", p, fill_rev[a])
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+run_all_auctions()

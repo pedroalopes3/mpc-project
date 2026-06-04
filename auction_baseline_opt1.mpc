@@ -26,7 +26,16 @@ def run_auction(asset_id):
     best_p_low = sint(MAX_PRICE)
     best_p_high = sint(0)
 
-    for p in range(1, MAX_PRICE + 1):
+    prices = sint.Array(N_PARTIES * N_ORDERS * 2)
+    for i in range(N_PARTIES * N_ORDERS):
+        prices[i] = bids_p[i]
+        prices[N_PARTIES * N_ORDERS + i] = asks_p[i]
+
+    prices.sort()
+
+    for iter in range(2 * N_PARTIES * N_ORDERS):
+        p = prices[iter]
+
         demand = sint(0)
         supply = sint(0)
 

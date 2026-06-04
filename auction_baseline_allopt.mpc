@@ -151,9 +151,9 @@ def run_auction(asset_id):
     for p in range(N_PARTIES):
         rationed_total_s += rationed_party_qty[p]
 
-    #reveal the total to avoid sint division (were only revealing an aggragate metric so it isn't so bad)
-    rationed_total = rationed_total_s.reveal()   # cint
-    safe_denom_cint = rationed_total + cint(rationed_total == 0) # so you don't divide by 0 (no eligible orders on both side).
+    # NEW: Prevent Division by Zero. If total is 0, make it 1 (the numerator max_vol will be 0 anyway).
+
+    safe_denom_s = rationed_total_s + (rationed_total_s == 0) # so you don't divide by 0 (no eligible orders on both side).
 
 
     #7 PRO-RATA FILLS
@@ -162,12 +162,11 @@ def run_auction(asset_id):
 
     sfix.round_nearest = True   #we turned round nearest so we can cast the sfix into a sint deterministically (before it was stochastic rounding)
 
-    public_ratio = cfix(max_vol_rev) / cfix(safe_denom_cint)    #revealed max vol / rationed eligible sum (cfix)
     shift = cfix(0.5) # nearest rounding with a -0.5 is the same as floor rounding
     epsilon = cfix(0.0001) # the epsilon is to account for the bit representations (7.9999999 instead of 8) (floor rounding would give 7)
 
     for p in range(N_PARTIES):
-        fill_float = rationed_party_qty[p] * public_ratio   #this is only a sint * cfix, should be much better
+        fill_float = sfix(rationed_party_qty[p]) * cfix(max_vol_rev) / sfix(safe_denom_s)
         
         party_fills[p] = sint(fill_float - shift + epsilon) #do the rounding
         
