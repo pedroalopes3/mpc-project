@@ -1,0 +1,152 @@
+
+# Auction Parameters
+N_PARTIES = 3
+N_ASSETS = 3
+N_ORDERS = 10
+MAX_PRICE = 220
+
+def run_auction(asset_id):
+    bids_p = sint.Array(N_PARTIES * N_ORDERS)
+    bids_q = sint.Array(N_PARTIES * N_ORDERS)
+    asks_p = sint.Array(N_PARTIES * N_ORDERS)
+    asks_q = sint.Array(N_PARTIES * N_ORDERS)
+
+    # 1. Input Phase
+    idx = 0
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            bids_p[idx] = sint.get_input_from(party)
+            bids_q[idx] = sint.get_input_from(party)
+            asks_p[idx] = sint.get_input_from(party)
+            asks_q[idx] = sint.get_input_from(party)
+            idx += 1
+
+    # 2. Find Clearing Price (Scanning Price Ladder)
+    max_vol = sint(0)
+    best_p_low = sint(MAX_PRICE)
+    best_p_high = sint(0)
+
+    for p in range(1, MAX_PRICE + 1):
+        demand = sint(0)
+        supply = sint(0)
+
+        for i in range(N_PARTIES * N_ORDERS):
+            is_valid_bid = bids_p[i] >= p
+            demand += is_valid_bid * bids_q[i]
+
+        for i in range(N_PARTIES * N_ORDERS):
+            is_valid_ask = (asks_p[i] <= p) * (asks_p[i] > 0)
+            supply += is_valid_ask * asks_q[i]
+
+        vol = (demand < supply).if_else(demand, supply)
+
+        #getting the low ang high price ranges for the max vol
+        is_new_max = vol > max_vol
+        is_at_least_max = vol >= max_vol
+
+        max_vol = is_new_max.if_else(vol, max_vol)
+        
+        best_p_low = is_new_max.if_else(p, best_p_low)#stops when it gets to vol max
+        best_p_high = is_at_least_max.if_else(p, best_p_high)
+
+    # Midpoint tie-break: p* = (p_low + p_high) / 2
+    clearing_price = best_p_low + best_p_high
+
+    # Immediately reveal clearing price and vol once calculated
+    clearing_price_rev = clearing_price.reveal() // 2
+    max_vol_rev = max_vol.reveal()
+
+
+
+    # 3. Determine eligible orders at clearing price (without modifying original arrays)
+    bids_eligible = sint.Array(N_PARTIES * N_ORDERS)
+    asks_eligible = sint.Array(N_PARTIES * N_ORDERS)
+
+    for i in range(N_PARTIES * N_ORDERS):
+        bids_eligible[i] = bids_p[i] >= clearing_price_rev
+        asks_eligible[i] = (asks_p[i] <= clearing_price_rev) * (asks_p[i] > 0)
+
+
+
+    # 4. Calculate total quantities (secret, used for pro-rata)
+
+    party_bid_qty = [sint(0)] * N_PARTIES #SEE THE IMPACT OF CHANGING THIS INTO sint.Array(N_PARTIES)
+    party_ask_qty = [sint(0)] * N_PARTIES #SEE THE IMPACT OF CHANGING THIS INTO sint.Array(N_PARTIES)
+
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            slot = party * N_ORDERS + i
+            party_bid_qty[party] += bids_eligible[slot] * bids_q[slot]
+            party_ask_qty[party] += bids_eligible[slot] * asks_q[slot]
+
+    
+    total_bid_qty = sint(0)
+    total_ask_qty = sint(0)
+
+    for party in range(N_PARTIES):
+        total_bid_qty += party_bid_qty[party]
+        total_ask_qty += party_ask_qty[party]
+
+    # 5. Determine which side is rationed (bids_rationed = 1 if bids > asks, else 0)
+    bids_rationed = total_bid_qty > total_ask_qty
+
+    # Reveal only the rationed side total (one reveal minimizes messages)
+    rationed_party_qty = [
+        bids_rationed * party_bid_qty[p] + (1 - bids_rationed) * party_ask_qty[p] for p in range(N_PARTIES)
+    ]
+    
+    # Rationed side sum (denominator)
+    rationed_total_s = sint(0)
+    for p in range(N_PARTIES):
+        rationed_total_s += rationed_party_qty[p]
+    
+    # NEW: Prevent Division by Zero. If total is 0, make it 1 (the numerator max_vol will be 0 anyway).
+    rationed_total = rationed_total_s.reveal()   # cint
+    safe_denom_cint = rationed_total + cint(rationed_total == 0) # so you don't divide by 0 (no eligible orders on both side).
+
+    #7 PRO-RATA FILLS
+    party_fills = [sint(0)] * N_PARTIES
+    total_alloc = sint(0)
+
+    sfix.round_nearest = True   #we turned round nearest so we can cast the sfix into a sint deterministically (before it was stochastic rounding)
+
+    public_ratio = cfix(max_vol_rev) / cfix(safe_denom_cint)    #revealed max vol / rationed eligible sum (cfix)
+    shift = cfix(0.5) # nearest rounding with a -0.5 is the same as floor rounding
+    epsilon = cfix(0.0001) # the epsilon is to account for the bit representations (7.9999999 instead of 8) (floor rounding would give 7)
+
+    for p in range(N_PARTIES):
+        fill_float = rationed_party_qty[p] * public_ratio   #this is only a sint * cfix, should be much better
+        
+        party_fills[p] = sint(fill_float - shift + epsilon) #do the rounding
+        
+        total_alloc += party_fills[p]
+
+    sfix.round_nearest = False
+
+    #8 Residual Allocation - Floor-rounding may leave up to (N_PARTIES - 1) unallocated
+    # Round-robin, with checks to see if the party wants more than 1
+    residual_left = max_vol - total_alloc #between 0-2
+
+    for p in range(N_PARTIES): #A more fair approach would be to create this sequence randomly, instead of always starting with party0
+        # Compare their current fill against their max eligible quantity
+        wants_more = party_fills[p] < rationed_party_qty[p]
+        
+        has_residuals = residual_left > 0 #checks if there are residuals to allocate yet
+        
+        # party gets 1 unit if both are true
+        gets_unit = wants_more * has_residuals # 1 or 0
+        
+        # add the unit to the party fill and subtract it from the residuals left
+        party_fills[p] += gets_unit
+        residual_left  -= gets_unit
+
+
+    #9 OUTPUT
+    print_ln("Asset %s Results:", asset_id)
+    print_ln("  Clearing Price    : %s", clearing_price_rev)
+    print_ln("  Transacted Volume : %s", max_vol_rev)
+    for p in range(N_PARTIES):
+        print_ln("  Party %s fill     : %s", p, party_fills[p].reveal())
+
+for asset in range(N_ASSETS):
+    run_auction(asset)

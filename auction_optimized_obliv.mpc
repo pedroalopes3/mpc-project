@@ -310,11 +310,11 @@ def run_auction(asset_id):
     total_alloc = regint(0)
 
     for p in range(N_PARTIES):
-        rq_int = regint(rationed_party_qty[p].reveal())
+        rq_int = regint(rationed_party_qty[p].reveal()) ##########################################################################################
         party_fills[p] = (rq_int * max_vol_int) // safe_denom
         total_alloc = total_alloc + party_fills[p]
 
-    # ── 11. Residual → primeiro partido elegível ──────────────────────────────
+    # ── 11. Residual → primeiro partido elegível ──────────────────────────────################################################################
     # Unidades residuais (floor rounding) vão para o primeiro partido elegível.
     residual          = max_vol_int - total_alloc
     residual_assigned = regint(0)

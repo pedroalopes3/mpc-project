@@ -1,0 +1,335 @@
+program.use_edabit(True) 
+
+# ── Auction Parameters ────────────────────────────────────────────────────────
+N_PARTIES    = 3
+N_ASSETS     = 3
+N_ORDERS     = 10
+MAX_PRICE    = 1000
+TOTAL_ORDERS = N_PARTIES * N_ORDERS   # 30 per-asset orders
+
+
+def run_all_auctions():
+    """
+    Execute sealed-bid double (dark) auctions for ALL N_ASSETS assets in a
+    single MPC execution, with every secret integer carrying N_ASSETS
+    independent values as a SIMD vector (size=N_ASSETS).
+
+    ┌──────┬────────────────────────────────────────────────────┬──────────┐
+    │ Tag  │ Optimisation                                        │ Status   │
+    ├──────┼────────────────────────────────────────────────────┼──────────┤
+    │ OPT1 │ Prefix-sum demand/supply (O(N) after sort)         │ PRESENT  │
+    │ OPT2 │ Batcher odd-even merge sort  O(N log²N)            │ PRESENT  │
+    │ OPT3 │ SIMD vectorisation (size=N_ASSETS on every sint)   │ NEW      │
+    │ OPT4 │ Reduce reveals: keep rationed_total secret via     │ NEW      │
+    │      │ sfix division instead of revealing denominator      │          │
+    │ OPT5a│ Loop fusion: eligibility + party aggregation in    │ NEW      │
+    │      │ one pass, eliminating 2×TOTAL_ORDERS intermediate   │          │
+    │      │ sint arrays                                         │          │
+    │ OPT5b│ Clearing-price inner loop: replace (vol == max_vol)│ NEW      │
+    │      │ with (vol >= max_vol) — saves ~1 comparison/rung    │          │
+    └──────┴────────────────────────────────────────────────────┴──────────┘
+
+    ── OPT1 (already present) ──────────────────────────────────────────────
+    After oblivious sort, supply and demand curves are built in two O(N)
+    sequential scans (running totals), not by recomputing D(p) and S(p) from
+    scratch for every rung.  This was correct in the baseline and is unchanged.
+
+    ── OPT2 (already present) ──────────────────────────────────────────────
+    order_matrix.sort() in MP-SPDZ dispatches to Batcher's odd-even merge
+    sort: O(N log²N) comparators and O(log²N) parallel depth.  The comment
+    "supposedly O(N log^2 N)" in the original confirms this.  No change needed.
+
+    ── OPT3 (NEW) — SIMD vectorisation ─────────────────────────────────────
+    Instead of calling run_auction(asset) in a loop over N_ASSETS, every
+    sint is tagged with size=N_ASSETS.  One MPC gate then processes all three
+    auctions simultaneously.
+
+    Algorithmic change:
+      • Input reads use sint.get_input_from(party, size=N_ASSETS): N_ASSETS
+        values are read from the party's tape and packed into one SIMD
+        register.  Parties supply inputs in asset-interleaved order (see §1).
+      • order_matrix entries are sint(size=N_ASSETS).  In Batcher's network
+        each compare-and-swap produces N_ASSETS independent comparison bits.
+        bit[k]=1 means "swap the two rows in lane k".  Each asset's data is
+        therefore sorted by its own prices, in parallel, through one shared
+        sorting network.
+      • All subsequent additions, comparisons, multiplications, and reveals
+        are element-wise across SIMD lanes, so the three auctions execute
+        simultaneously at the crypto layer.
+      • Speedup: the total number of MPC gates is unchanged, but the wall-
+        clock cost (dominated by interactive rounds) is reduced by up to
+        N_ASSETS because rounds for all assets overlap.
+
+    ── OPT4 (NEW) — Reduce reveals: eliminate rationed_total expose ─────────
+    Baseline revealed rationed_total_s as a cint and used it as a fully public
+    denominator in the pro-rata formula.  This discloses the aggregate
+    short-side eligible volume — how oversubscribed the rationed side is —
+    beyond what clearing_price and max_vol already tell the parties.
+
+    Algorithmic change:
+      • rationed_total_s stays secret throughout.
+      • A zero-denominator guard is computed obliviously:
+          safe_denom_s = rationed_total_s + (rationed_total_s == 0)
+        The == comparison returns a secret bit; adding it keeps the value
+        >= 1 without any branch or reveal.
+      • Pro-rata fills use secret fixed-point division:
+          fill = sfix(qty) * cfix(max_vol_rev) / sfix(safe_denom_s)
+        sfix.__truediv__ invokes the ABZS truncation protocol — O(1) extra
+        interactive rounds for fixed N_PARTIES — at the cost of higher
+        communication vs. plain public division.  Privacy improves at a
+        bounded, acceptable overhead.
+      • Note: max_vol_rev is already a legitimately revealed output, so
+        cfix(max_vol_rev) is public; only the denominator changes from
+        public to secret.
+
+    ── OPT5a (NEW) — Loop fusion: eligibility + party aggregation ───────────
+    Baseline steps 4 and 5 were two separate passes:
+      Step 4 — build bids_elig[TOTAL_ORDERS] and asks_elig[TOTAL_ORDERS]
+      Step 5 — accumulate party quantities by reading those arrays
+
+    Algorithmic change:
+      Merge both into a single (N_PARTIES × N_ORDERS) loop.  Eligibility is
+      computed on the fly and consumed immediately, eliminating 2×TOTAL_ORDERS
+      = 60 intermediate sint allocations and one complete array scan.
+      Multiplication and comparison counts are identical.
+
+    ── OPT5b (NEW) — Clearing-price loop: >= replaces == ───────────────────
+    Baseline inner loop:
+      is_new_max   = vol > max_vol          # 1 comparison round
+      is_equal_max = vol == max_vol         # ~2 comparison rounds + AND gate
+      best_p_high  updated via nested       # 2 multiplications
+                   if_else(is_new_max, …,
+                   if_else(is_equal_max, …))
+
+    Algorithmic change:
+      Observe that is_new_max and is_equal_max are mutually exclusive
+      (at most one can be 1).  Therefore:
+          best_p_high should update  iff  vol >= max_vol
+      which is a single comparison (>= costs 1 round in MPC; == costs ~2).
+      Replacing the nested if_else with one flat if_else also removes one
+      multiplication per rung.
+
+      New inner loop:
+          is_new_max      = vol >  max_vol    # 1 comparison
+          is_at_least_max = vol >= max_vol    # 1 comparison  (was == : ~2)
+          best_p_high = is_at_least_max.if_else(p, best_p_high)  # 1 mult
+
+      Saving per rung: ~1 comparison round + 1 multiplication.
+      Over 2×TOTAL_ORDERS = 60 rungs: ~60 comparison rounds, 60 mults.
+    """
+
+    # ── 1. INPUT RETRIEVAL ────────────────────────────────────────────────────
+    # [OPT3] size=N_ASSETS packs one input per asset into a SIMD register.
+    #
+    # Required tape layout for each party:
+    #   For each order i (i = 0 … N_ORDERS-1):
+    #     N_ASSETS bids_p values  (asset 0, 1, 2)
+    #     N_ASSETS bids_q values
+    #     N_ASSETS asks_p values
+    #     N_ASSETS asks_q values
+    # ─────────────────────────────────────────────────────────────────────────
+    bids_p = sint.Array(TOTAL_ORDERS)   # each element: sint(size=N_ASSETS)
+    bids_q = sint.Array(TOTAL_ORDERS)
+    asks_p = sint.Array(TOTAL_ORDERS)
+    asks_q = sint.Array(TOTAL_ORDERS)
+
+    idx = 0
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            bids_p[idx] = sint.get_input_from(party, size=N_ASSETS)  # [OPT3]
+            bids_q[idx] = sint.get_input_from(party, size=N_ASSETS)
+            asks_p[idx] = sint.get_input_from(party, size=N_ASSETS)
+            asks_q[idx] = sint.get_input_from(party, size=N_ASSETS)
+            idx += 1
+
+
+    # ── 2. OBLIVIOUS SORT ─────────────────────────────────────────────────────
+    # [OPT2 already present] Batcher's odd-even merge sort via Matrix.sort().
+    # [OPT3] Each matrix element is sint(size=N_ASSETS).  The compare-and-swap
+    # at each network stage compares two price SIMD vectors, yielding N_ASSETS
+    # independent comparison bits.  Rows are conditionally swapped lane-wise,
+    # so each asset's rows are sorted by that asset's own prices — all in one
+    # shared network pass.
+    # ─────────────────────────────────────────────────────────────────────────
+    order_matrix = sint.Matrix(2 * TOTAL_ORDERS, 3)
+
+    for i in range(TOTAL_ORDERS):
+        order_matrix[i][0] = bids_p[i]
+        order_matrix[i][1] = bids_q[i]
+        order_matrix[i][2] = sint(0, size=N_ASSETS)
+
+        order_matrix[TOTAL_ORDERS + i][0] = asks_p[i]
+        order_matrix[TOTAL_ORDERS + i][1] = sint(0, size=N_ASSETS)
+        order_matrix[TOTAL_ORDERS + i][2] = asks_q[i]
+
+    order_matrix.sort()   # O(N log²N), all N_ASSETS lanes in parallel [OPT2, OPT3]
+
+
+    # ── 3. PREFIX-SUM SUPPLY / DEMAND ─────────────────────────────────────────
+    # [OPT1 already present] O(N) running totals after the sort.
+    # [OPT3] Each addition is now a SIMD operation across N_ASSETS.
+    # ─────────────────────────────────────────────────────────────────────────
+    supply = sint.Array(2 * TOTAL_ORDERS)
+    demand = sint.Array(2 * TOTAL_ORDERS)
+
+    running_supply = sint(0, size=N_ASSETS)
+    for i in range(2 * TOTAL_ORDERS):
+        running_supply = running_supply + order_matrix[i][2]
+        supply[i] = running_supply
+
+    running_demand = sint(0, size=N_ASSETS)
+    for i in range(2 * TOTAL_ORDERS - 1, -1, -1):
+        running_demand = running_demand + order_matrix[i][1]
+        demand[i] = running_demand
+
+
+    # ── 4. CLEARING PRICE ─────────────────────────────────────────────────────
+    # [OPT5b] Replace the baseline (vol > max_vol, vol == max_vol) pair with
+    #         (vol > max_vol, vol >= max_vol).
+    #
+    #  Old cost per rung:
+    #    vol > max_vol   → 1 comparison round
+    #    vol == max_vol  → ~2 comparison rounds + 1 AND gate
+    #    3 × if_else     → 3 multiplications
+    #
+    #  New cost per rung:
+    #    vol > max_vol   → 1 comparison round
+    #    vol >= max_vol  → 1 comparison round    ← saves ~1 round per rung
+    #    3 × if_else     → 3 multiplications     ← same (nested becomes flat)
+    #
+    # Correctness: is_new_max and the "equal" case are mutually exclusive, so
+    #   best_p_high should be updated whenever vol >= max_vol, and best_p_low
+    #   only when vol > max_vol.  The flat if_else is semantically identical
+    #   to the original nested construct, using one fewer multiplication.
+    # ─────────────────────────────────────────────────────────────────────────
+    max_vol     = sint(0,         size=N_ASSETS)
+    best_p_low  = sint(MAX_PRICE, size=N_ASSETS)
+    best_p_high = sint(0,         size=N_ASSETS)
+
+    for i in range(2 * TOTAL_ORDERS):
+        p   = order_matrix[i][0]
+        vol = (demand[i] < supply[i]).if_else(demand[i], supply[i])
+        vol = vol * (p > 0)   # mask price-0 sentinel rows
+
+        is_new_max      = vol >  max_vol   # [OPT5b] 1 comparison round
+        is_at_least_max = vol >= max_vol   # [OPT5b] 1 comparison round (was ==: ~2)
+
+        max_vol     = is_new_max.if_else(vol, max_vol)
+        best_p_low  = is_new_max.if_else(p,   best_p_low)
+        best_p_high = is_at_least_max.if_else(p, best_p_high)   # [OPT5b] flat if_else
+
+    # clearing_price and max_vol are the intended public outputs; reveals here
+    # are justified and unchanged from the baseline.
+    clearing_price_rev = (best_p_low + best_p_high).reveal() // 2   # cint(size=N_ASSETS)
+    max_vol_rev        = max_vol.reveal()                             # cint(size=N_ASSETS)
+
+    for a in range(N_ASSETS):
+        print_ln("Asset %s: clearing_price=%s  volume=%s",
+                 a, clearing_price_rev[a], max_vol_rev[a])
+
+
+    # ── 5. ELIGIBLE ORDERS + PARTY AGGREGATION  (fused)  ──────────────────────
+    # [OPT5a] Baseline step 4 built bids_elig[TOTAL_ORDERS] and
+    #         asks_elig[TOTAL_ORDERS], then step 5 iterated over them.
+    #         Fusing both into one loop eliminates 2*TOTAL_ORDERS = 60 sint
+    #         allocations and one full array traversal.
+    #         Operation count (comparisons + multiplications) is unchanged.
+    # ─────────────────────────────────────────────────────────────────────────
+    party_bid_qty = [sint(0, size=N_ASSETS) for _ in range(N_PARTIES)]
+    party_ask_qty = [sint(0, size=N_ASSETS) for _ in range(N_PARTIES)]
+
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            slot = party * N_ORDERS + i
+            # Compute eligibility and accumulate in the same iteration [OPT5a]
+            bid_elig = bids_p[slot] >= clearing_price_rev                           # sint >= cint
+            ask_elig = (asks_p[slot] <= clearing_price_rev) * (asks_p[slot] > 0)   # sint <= cint
+            party_bid_qty[party] = party_bid_qty[party] + bid_elig * bids_q[slot]
+            party_ask_qty[party] = party_ask_qty[party] + ask_elig * asks_q[slot]
+
+
+    # ── 6. RATIONED SIDE ──────────────────────────────────────────────────────
+    total_bid_qty = sint(0, size=N_ASSETS)
+    total_ask_qty = sint(0, size=N_ASSETS)
+    for party in range(N_PARTIES):
+        total_bid_qty = total_bid_qty + party_bid_qty[party]
+        total_ask_qty = total_ask_qty + party_ask_qty[party]
+
+    bids_rationed = total_bid_qty > total_ask_qty
+
+    rationed_party_qty = [
+        bids_rationed * party_bid_qty[p] + (1 - bids_rationed) * party_ask_qty[p]
+        for p in range(N_PARTIES)
+    ]
+
+    rationed_total_s = sint(0, size=N_ASSETS)
+    for p in range(N_PARTIES):
+        rationed_total_s = rationed_total_s + rationed_party_qty[p]
+
+
+    # ── 7. PRO-RATA FILLS  [OPT4: keep rationed_total secret] ────────────────
+    # Baseline revealed rationed_total_s here:
+    #   rationed_total = rationed_total_s.reveal()    ← REMOVED
+    #   safe_denom_cint = rationed_total + (rationed_total == 0)
+    #   public_ratio = cfix(max_vol_rev) / cfix(safe_denom_cint)
+    #   fill = rationed_party_qty[p] * public_ratio   (sint × cfix)
+    #
+    # The reveal leaks the aggregate short-side eligible volume — how
+    # oversubscribed the rationed side was — beyond what clearing_price and
+    # max_vol already disclose.
+    #
+    # [OPT4] New approach: zero-denominator guard stays entirely secret:
+    #   safe_denom_s = rationed_total_s + (rationed_total_s == 0)
+    #   fill = sfix(qty) * cfix(max_vol_rev) / sfix(safe_denom_s)
+    #
+    # sfix.__truediv__ uses the ABZS truncation protocol.  For small N_PARTIES
+    # the extra round cost is bounded and the privacy gain is real.
+    # cfix(max_vol_rev) stays public (already revealed as a legitimate output).
+    # ─────────────────────────────────────────────────────────────────────────
+    safe_denom_s = rationed_total_s + (rationed_total_s == 0)  # secret, always >= 1
+
+    sfix.round_nearest = True   # nearest rounding for correct floor semantics
+
+    party_fills = [sint(0, size=N_ASSETS) for _ in range(N_PARTIES)]
+    total_alloc = sint(0, size=N_ASSETS)
+
+    for p in range(N_PARTIES):
+        # Numerator: secret qty × public max_vol (no extra reveal needed)
+        # Denominator: secret rationed_total via sfix division  [OPT4]
+        fill_sfix = sfix(rationed_party_qty[p]) * cfix(max_vol_rev) / sfix(safe_denom_s)
+        party_fills[p] = sint(fill_sfix)
+        total_alloc = total_alloc + party_fills[p]
+
+    sfix.round_nearest = False
+
+
+    # ── 8. RESIDUAL ALLOCATION ────────────────────────────────────────────────
+    # Logic unchanged; arithmetic is SIMD-vectorised throughout [OPT3].
+    # Floor-rounding in step 7 may leave up to N_PARTIES - 1 unallocated units;
+    # distribute them round-robin, subject to eligibility.
+    # ─────────────────────────────────────────────────────────────────────────
+    residual_left = max_vol - total_alloc   # secret, in [0, N_PARTIES - 1]
+
+    for p in range(N_PARTIES):
+        wants_more    = party_fills[p] < rationed_party_qty[p]
+        has_residuals = residual_left > 0
+        gets_unit     = wants_more * has_residuals
+        party_fills[p] = party_fills[p] + gets_unit
+        residual_left  = residual_left  - gets_unit
+
+
+    # ── 9. OUTPUT ─────────────────────────────────────────────────────────────
+    # Only final per-party fills are revealed — the only output not yet public.
+    # SIMD lanes are accessed with [a] indexing on the cint result of .reveal().
+    # ─────────────────────────────────────────────────────────────────────────
+    for a in range(N_ASSETS):
+        print_ln("Asset %s Results:", a)
+        print_ln("  Clearing Price    : %s", clearing_price_rev[a])
+        print_ln("  Transacted Volume : %s", max_vol_rev[a])
+        for p in range(N_PARTIES):
+            fill_rev = party_fills[p].reveal()
+            print_ln("  Party %s fill     : %s", p, fill_rev[a])
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+run_all_auctions()

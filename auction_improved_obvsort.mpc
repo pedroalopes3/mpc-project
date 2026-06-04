@@ -1,23 +1,4 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# auction_improved.mpc — Improved Dark Auction Baseline (Milestones 1-2)
-#
-# Key improvements over auction.mpc:
-#   1. program.use_edabit(True): reduces bit-decomposition cost by using
-#      edaBit pairs (r, r_bits) from preprocessing, cutting comparison
-#      round complexity by ~3-4x.
-#   3. Correct integer division: MP-SPDZ's // operator requires both
-#      operands to be sint. The denominator (safe_denom) is promoted from
-#      cint to sint via sint(safe_denom) before the division.
-#   4. Use revealed clearing_price_rev (cint) for eligibility comparisons
-#      (sint OP cint is cheaper than sint OP sint).
-#   5. Zero-division guard on the public cint denominator before promotion.
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Instructs the compiler to use edaBit preprocessing for all bit operations.
-# edaBits are (r, r_0, r_1, …, r_k) pairs such that r = Σ r_i 2^i, all
-# secret-shared. Comparisons built on edaBits require fewer communication
-# rounds than the generic bit-decomposition protocol.
-program.use_edabit(True)
+program.use_edabit(True) 
 
 # ── Auction Parameters ────────────────────────────────────────────────────────
 N_PARTIES = 3
@@ -170,63 +151,49 @@ def run_auction(asset_id):
     for p in range(N_PARTIES):
         rationed_total_s += rationed_party_qty[p]
 
-    # REVEAL 3 — rationed_total:
-    #   The pro-rata denominator sum_j q_j must be public so that integer
-    #   division can be performed. We reveal one aggregate scalar — not any
-    #   individual party's quantity — minimising leakage.
-
+    #reveal the total to avoid sint division (were only revealing an aggragate metric so it isn't so bad)
     rationed_total = rationed_total_s.reveal()   # cint
-
-    # Guard against zero denominator (no eligible orders on either side).
-    safe_denom_cint = rationed_total + cint(rationed_total == 0)
+    safe_denom_cint = rationed_total + cint(rationed_total == 0) # so you don't divide by 0 (no eligible orders on both side).
 
 
-
-    # ── 7. Party-Level Pro-Rata Fills ─────────────────────────────────────────
-
+    #7 PRO-RATA FILLS
     party_fills = [sint(0)] * N_PARTIES
     total_alloc = sint(0)
 
-    #to avoid the sint/sint we revealed the rationed eligible sum (which should't be too much of a problem)
-    sfix.round_nearest = True   #we turned round nearest so we can cast the sfix into a sint (before it was stochastic rounding)
+    sfix.round_nearest = True   #we turned round nearest so we can cast the sfix into a sint deterministically (before it was stochastic rounding)
 
     public_ratio = cfix(max_vol_rev) / cfix(safe_denom_cint)    #revealed max vol / rationed eligible sum (cfix)
-    shift = cfix(0.5)
-    epsilon = cfix(0.0001)
+    shift = cfix(0.5) # nearest rounding with a -0.5 is the same as floor rounding
+    epsilon = cfix(0.0001) # the epsilon is to account for the bit representations (7.9999999 instead of 8) (floor rounding would give 7)
 
     for p in range(N_PARTIES):
         fill_float = rationed_party_qty[p] * public_ratio   #this is only a sint * cfix, should be much better
         
-        party_fills[p] = sint(fill_float - shift + epsilon) #the epsilon is to account for the bit representations (7.9999999 instead of 8) (floor rounding would give 7)
+        party_fills[p] = sint(fill_float - shift + epsilon) #do the rounding
         
         total_alloc += party_fills[p]
 
     sfix.round_nearest = False
 
-    # ── 8. Residual Allocation ────────────────────────────────────────────────
-    # Floor-rounding may leave up to (N_PARTIES - 1) unallocated units.
-
-
+    #8 Residual Allocation - Floor-rounding may leave up to (N_PARTIES - 1) unallocated
     # Round-robin, with checks to see if the party wants more than 1
-    residual_left = max_vol - total_alloc
+    residual_left = max_vol - total_alloc #between 0-2
 
-    for p in range(N_PARTIES):
-        # 1. Does this party actually have unfilled demand?
-        # (Compare their current base fill against their max eligible quantity)
-        wants_more = party_fills[p] < rationed_party_qty[p]  # sint boolean
+    for p in range(N_PARTIES): #A more fair approach would be to create this sequence randomly, instead of always starting with party0
+        # Compare their current fill against their max eligible quantity
+        wants_more = party_fills[p] < rationed_party_qty[p]
         
-        # 2. Do we still have residual units left to give out?
-        has_residuals = residual_left > 0                    # sint boolean
+        has_residuals = residual_left > 0 #checks if there are residuals to allocate yet
         
-        # 3. Party gets EXACTLY 1 unit if both conditions are true
-        gets_unit = wants_more * has_residuals               # 1 or 0
+        # party gets 1 unit if both are true
+        gets_unit = wants_more * has_residuals # 1 or 0
         
-        # 4. Apply the unit and decrement the pool
+        # add the unit to the party fill and subtract it from the residuals left
         party_fills[p] += gets_unit
         residual_left  -= gets_unit
 
     
-    # ── 9. Output ─────────────────────────────────────────────────────────────
+    #9 OUTPUT
     print_ln("Asset %s Results:", asset_id)
     print_ln("  Clearing Price    : %s", clearing_price_rev)
     print_ln("  Transacted Volume : %s", max_vol_rev)
