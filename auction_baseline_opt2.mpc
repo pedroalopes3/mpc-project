@@ -7,12 +7,12 @@ N_ORDERS = 10
 MAX_PRICE = 220
 
 def run_auction(asset_id):
+    #1 INPUT RETRIEVAL - We make 4 secret arrays with 30 len (party0/party1/party2)
     bids_p = sint.Array(N_PARTIES * N_ORDERS)
     bids_q = sint.Array(N_PARTIES * N_ORDERS)
     asks_p = sint.Array(N_PARTIES * N_ORDERS)
     asks_q = sint.Array(N_PARTIES * N_ORDERS)
 
-    # 1. Input Phase
     idx = 0
     for party in range(N_PARTIES):
         for i in range(N_ORDERS):
@@ -22,7 +22,7 @@ def run_auction(asset_id):
             asks_q[idx] = sint.get_input_from(party)
             idx += 1
 
-    # 2. Find Clearing Price (Scanning Price Ladder)
+    #2 PUBLIC PRICE LADDER - iterate from 0 to MAX_PRICE
     max_vol = sint(0)
     best_p_low = sint(MAX_PRICE)
     best_p_high = sint(0)
@@ -50,16 +50,16 @@ def run_auction(asset_id):
         best_p_low = is_new_max.if_else(p, best_p_low) #stops when it gets to vol max
         best_p_high = is_at_least_max.if_else(p, best_p_high) #stops when vol drops
 
-    # Midpoint tie-break: p* = (p_low + p_high) / 2
+
+    #3 CLEARING PRICE AND MAX VOL
     clearing_price = best_p_low + best_p_high
 
-    # Immediately reveal clearing price and vol once calculated
+    #reveal them straight awya
     clearing_price_rev = clearing_price.reveal() // 2
     max_vol_rev = max_vol.reveal()
 
 
-
-    # 3. Determine eligible orders at clearing price (without modifying original arrays)
+    #4 ELIGIBLE ORDERS (asks<=cp and bids>=cp)
     bids_eligible = sint.Array(N_PARTIES * N_ORDERS)
     asks_eligible = sint.Array(N_PARTIES * N_ORDERS)
 
@@ -68,19 +68,19 @@ def run_auction(asset_id):
         asks_eligible[i] = (asks_p[i] <= clearing_price_rev) * (asks_p[i] > 0)
 
 
-
-    # 4. Calculate total quantities (secret, used for pro-rata)
-
-    party_bid_qty = [sint(0)] * N_PARTIES #SEE THE IMPACT OF CHANGING THIS INTO sint.Array(N_PARTIES)
-    party_ask_qty = [sint(0)] * N_PARTIES #SEE THE IMPACT OF CHANGING THIS INTO sint.Array(N_PARTIES)
+    #5 GROUP THINGS BY PARTY - needed for prorata we give to each distributor  
+    party_bid_qty = sint.Array(N_PARTIES)
+    party_ask_qty = sint.Array(N_PARTIES)
 
     for party in range(N_PARTIES):
         for i in range(N_ORDERS):
             slot = party * N_ORDERS + i
             party_bid_qty[party] += bids_eligible[slot] * bids_q[slot]
-            party_ask_qty[party] += bids_eligible[slot] * asks_q[slot]
+            party_ask_qty[party] += asks_eligible[slot] * asks_q[slot]
 
-    
+
+    #6 RATIONED SIDE - not just divide the max vol for the bids
+    #  if the sellers are the ones being rationed we also need to do the fill for them
     total_bid_qty = sint(0)
     total_ask_qty = sint(0)
 
@@ -88,20 +88,16 @@ def run_auction(asset_id):
         total_bid_qty += party_bid_qty[party]
         total_ask_qty += party_ask_qty[party]
 
-    # 5. Determine which side is rationed (bids_rationed = 1 if bids > asks, else 0)
     bids_rationed = total_bid_qty > total_ask_qty
 
-    # Reveal only the rationed side total (one reveal minimizes messages)
-    rationed_party_qty = [
-        bids_rationed * party_bid_qty[p] + (1 - bids_rationed) * party_ask_qty[p] for p in range(N_PARTIES)
-    ]
+    # if bids_rationed == party_bid_qty, else bids_rationed == party_ask_qty
+    rationed_party_qty = bids_rationed.if_else(party_bid_qty,  party_ask_qty)
     
     # Rationed side sum (denominator)
     rationed_total_s = sint(0)
     for p in range(N_PARTIES):
         rationed_total_s += rationed_party_qty[p]
     
-    # NEW: Prevent Division by Zero. If total is 0, make it 1 (the numerator max_vol will be 0 anyway).
     rationed_total = rationed_total_s.reveal()   # cint
     safe_denom_cint = rationed_total + cint(rationed_total == 0) # so you don't divide by 0 (no eligible orders on both side).
 
@@ -148,6 +144,8 @@ def run_auction(asset_id):
     print_ln("  Transacted Volume : %s", max_vol_rev)
     for p in range(N_PARTIES):
         print_ln("  Party %s fill     : %s", p, party_fills[p].reveal())
+
+
 
 for asset in range(N_ASSETS):
     run_auction(asset)

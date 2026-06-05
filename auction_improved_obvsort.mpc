@@ -10,25 +10,6 @@ TOTAL_ORDERS = N_PARTIES * N_ORDERS
 
 
 def run_auction(asset_id):
-    """
-    Execute a sealed-bid double (dark) auction for one asset.
-
-    Model:
-        Each of the N_PARTIES parties is a distributor (broker/exchange member)
-        that has collected N_ORDERS buy/sell orders from its own clients.
-        The MPC determines:
-          * The uniform clearing price p* at which the market clears.
-          * The total transacted volume V*.
-          * One fill per party: how many units that party's clients collectively
-            receive. The party then privately distributes this fill to its
-            clients using its own internal records.
-
-    Privacy guarantee:
-        All intermediate values (individual order prices, quantities, per-rung
-        demand/supply curves) remain secret-shared throughout. Only the final
-        market results are revealed via .reveal() — each call is justified
-        in the comments below.
-    """
     #1 INPUT RETRIEVAL - We make 4 secret arrays with 30 len (party0/party1/party2)
     bids_p = sint.Array(TOTAL_ORDERS)
     bids_q = sint.Array(TOTAL_ORDERS)

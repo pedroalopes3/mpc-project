@@ -1,0 +1,293 @@
+# ── Auction Parameters ────────────────────────────────────────────────────────
+N_PARTIES    = 3
+N_ASSETS     = 3
+N_ORDERS     = 10
+MAX_PRICE    = 1000
+TOTAL_ORDERS = N_PARTIES * N_ORDERS   # 30 per-asset orders
+N_ROWS       = 2 * TOTAL_ORDERS       # 60 rows in order matrix
+
+# Pad to next power of 2 for bitonic sort
+N_PADDED = 1
+while N_PADDED < N_ROWS:
+    N_PADDED <<= 1        # = 64
+SENTINEL_P = MAX_PRICE + 1  # sentinel price (1001) sorts to end of ascending sequence
+
+
+# ── SIMD-interleaved bitonic sort helpers ─────────────────────────────────────
+
+def _cswap_all(mats, i, j, asc):
+    """
+    Compare-and-swap rows i and j of ALL N_ASSETS matrices at once.
+
+    [OPT3] For every comparator position (i, j) in the sorting network,
+    N_ASSETS independent compare-and-swap operations are placed consecutively
+    in the circuit.  The MPC runtime batches them in the same offline
+    preprocessing batch and online communication round, giving N_ASSETS-fold
+    parallelism without any change to the input tape format.
+
+    asc=True  → ensure mats[a][i][0] <= mats[a][j][0] for every asset a
+    asc=False → ensure mats[a][i][0] >= mats[a][j][0] for every asset a
+    """
+    for a in range(N_ASSETS):
+        if asc:
+            c = mats[a][i][0] > mats[a][j][0]
+        else:
+            c = mats[a][j][0] > mats[a][i][0]
+        for col in range(3):
+            x = mats[a][i][col]
+            y = mats[a][j][col]
+            mats[a][i][col] = c.if_else(y, x)
+            mats[a][j][col] = c.if_else(x, y)
+
+
+def bitonic_sort_all(mats):
+    """
+    Batcher's bitonic sort on N_ASSETS matrices simultaneously.
+
+    [OPT2] O(N log^2 N) comparators, O(log^2 N) depth — same as
+           order_matrix.sort() in the baseline.
+    [OPT3] Each comparator position calls _cswap_all, placing N_ASSETS
+           independent cswaps at the same circuit depth.  The result is
+           N_ASSETS fully sorted matrices produced in the same number of
+           communication rounds as a single sort.
+
+    Requires len(mats[a]) == N_PADDED (a power of 2).
+
+    Bitonic invariant: pair (i, i^j) is sorted ascending  when (i & k) == 0
+    and descending when (i & k) != 0.  In the final pass k == N_PADDED:
+    all i < N_PADDED satisfy (i & N_PADDED) == 0, so the entire array
+    ends up ascending.
+    """
+    n = N_PADDED
+    k = 2
+    while k <= n:
+        j = k >> 1
+        while j >= 1:
+            for i in range(n):
+                l = i ^ j
+                if l > i:
+                    _cswap_all(mats, i, l, asc=((i & k) == 0))
+            j >>= 1
+        k <<= 1
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def run_all_auctions():
+    """
+    Run all N_ASSETS dark auctions with circuit-level SIMD interleaving.
+
+    ┌───────┬──────────────────────────────────────────────────────┬─────────┐
+    │ Tag   │ Optimisation                                          │ Status  │
+    ├───────┼──────────────────────────────────────────────────────┼─────────┤
+    │ OPT1  │ Prefix-sum supply/demand (O(N) scans after sort)     │ PRESENT │
+    │ OPT2  │ Batcher's bitonic sort  O(N log^2 N)                 │ PRESENT │
+    │ OPT3  │ SIMD via circuit-level interleaving                  │ NEW     │
+    │ OPT4  │ rationed_total kept secret via sfix division         │ NEW     │
+    │ OPT5a │ Loop fusion: elig + aggregation in one pass          │ NEW     │
+    │ OPT5b │ >= replaces == in clearing-price loop                │ NEW     │
+    └───────┴──────────────────────────────────────────────────────┴─────────┘
+
+    ── OPT3: why sint(size=N_ASSETS) was wrong and what we do instead ────────
+
+    The first SIMD attempt used sint.get_input_from(party, size=N_ASSETS),
+    which reads N_ASSETS CONSECUTIVE tape values into one SIMD register.
+    The existing test tape is asset-MAJOR (all orders for asset 0, then
+    asset 1, then asset 2), so consecutive values are different fields of
+    the same asset, not the same field across assets — corrupting results.
+
+    The correct approach uses CIRCUIT-LEVEL INTERLEAVING:
+
+      1. Read all N_ASSETS assets upfront with scalar get_input_from calls
+         in asset-major order → 100 % compatible with existing test data.
+
+      2. For every hot-path loop (sort comparators, prefix-sum, clearing-
+         price, eligibility, pro-rata fills) the inner loop body covers
+         all N_ASSETS assets before the outer index advances.
+
+      3. This places N_ASSETS INDEPENDENT operations at the SAME circuit
+         depth position.  The MPC runtime sees them as one batch:
+           • Offline phase  : all N_ASSETS triples generated together.
+           • Online phase   : all N_ASSETS multiplications / comparisons
+                              sent in the same message.
+         Net effect: N_ASSETS-fold reduction in round complexity for every
+         hot loop — identical to sint(size=N_ASSETS) SIMD, without
+         touching the tape format.
+
+      4. The sort is implemented manually as a bitonic network so that
+         _cswap_all places N_ASSETS cswaps at the SAME network depth,
+         rather than three sequential order_matrix.sort() calls.
+         Using sint.Matrix.sort() three times would put asset 1's sort
+         gates after all of asset 0's — no batching opportunity.
+    """
+
+    # ── 1. INPUT RETRIEVAL ───────────────────────────────────────────────────
+    # All N_ASSETS assets read upfront before any computation gate is emitted.
+    # Asset-major order: all orders for asset 0, then 1, then 2 — unchanged
+    # from baseline, fully compatible with existing test inputs.
+    bids_p = [[None] * TOTAL_ORDERS for _ in range(N_ASSETS)]
+    bids_q = [[None] * TOTAL_ORDERS for _ in range(N_ASSETS)]
+    asks_p = [[None] * TOTAL_ORDERS for _ in range(N_ASSETS)]
+    asks_q = [[None] * TOTAL_ORDERS for _ in range(N_ASSETS)]
+
+    for a in range(N_ASSETS):
+        idx = 0
+        for party in range(N_PARTIES):
+            for i in range(N_ORDERS):
+                bids_p[a][idx] = sint.get_input_from(party)
+                bids_q[a][idx] = sint.get_input_from(party)
+                asks_p[a][idx] = sint.get_input_from(party)
+                asks_q[a][idx] = sint.get_input_from(party)
+                idx += 1
+
+    # ── 2. OBLIVIOUS SORT  [OPT2 + OPT3] ────────────────────────────────────
+    # N_ASSETS Python list-of-lists; each padded to N_PADDED=64 with sentinel
+    # rows (price=SENTINEL_P=1001, qty=0) that sort to positions 60..63.
+    # All subsequent loops use range(N_ROWS)=range(60), never touching them.
+    #
+    # [OPT3] bitonic_sort_all interleaves the N_ASSETS sorts at every
+    # comparator position via _cswap_all → all three sorts run in the same
+    # number of rounds as a single sort.
+    order_mats = [
+        [[sint(SENTINEL_P), sint(0), sint(0)] for _ in range(N_PADDED)]
+        for _ in range(N_ASSETS)
+    ]
+    for a in range(N_ASSETS):
+        for i in range(TOTAL_ORDERS):
+            order_mats[a][i]              = [bids_p[a][i], bids_q[a][i], sint(0)]
+            order_mats[a][TOTAL_ORDERS+i] = [asks_p[a][i], sint(0),      asks_q[a][i]]
+
+    bitonic_sort_all(order_mats)   # [OPT2, OPT3]
+
+    # ── 3. PREFIX-SUM SUPPLY / DEMAND  [OPT1 + OPT3] ─────────────────────────
+    # [OPT3] Inner loop `for a in range(N_ASSETS)` places all N_ASSETS
+    # additions at circuit depth i — batched in the same online round.
+    supply = [[None] * N_ROWS for _ in range(N_ASSETS)]
+    demand = [[None] * N_ROWS for _ in range(N_ASSETS)]
+
+    running_s = [sint(0) for _ in range(N_ASSETS)]
+    for i in range(N_ROWS):
+        for a in range(N_ASSETS):                          # [OPT3] N_ASSETS in one round
+            running_s[a] = running_s[a] + order_mats[a][i][2]
+            supply[a][i] = running_s[a]
+
+    running_d = [sint(0) for _ in range(N_ASSETS)]
+    for i in range(N_ROWS - 1, -1, -1):
+        for a in range(N_ASSETS):                          # [OPT3]
+            running_d[a] = running_d[a] + order_mats[a][i][1]
+            demand[a][i] = running_d[a]
+
+    # ── 4. CLEARING PRICE  [OPT5b + OPT3] ────────────────────────────────────
+    # [OPT5b] >= instead of == saves ~1 comparison round per rung per asset.
+    #         Over 60 rungs × 3 assets: ~180 comparison rounds saved.
+    # [OPT3]  Inner loop places N_ASSETS comparisons at the same depth.
+    max_vol     = [sint(0)         for _ in range(N_ASSETS)]
+    best_p_low  = [sint(MAX_PRICE) for _ in range(N_ASSETS)]
+    best_p_high = [sint(0)         for _ in range(N_ASSETS)]
+
+    for i in range(N_ROWS):
+        for a in range(N_ASSETS):                          # [OPT3]
+            p   = order_mats[a][i][0]
+            vol = (demand[a][i] < supply[a][i]).if_else(demand[a][i], supply[a][i])
+            vol = vol * (p > 0)
+
+            is_new_max      = vol >  max_vol[a]            # 1 round  [OPT5b]
+            is_at_least_max = vol >= max_vol[a]            # 1 round  [OPT5b, was ==: ~2]
+
+            max_vol[a]     = is_new_max.if_else(vol,  max_vol[a])
+            best_p_low[a]  = is_new_max.if_else(p,    best_p_low[a])
+            best_p_high[a] = is_at_least_max.if_else(p, best_p_high[a])
+
+    # Reveals are necessary public outputs; unchanged from baseline.
+    clearing_price_rev = [(best_p_low[a] + best_p_high[a]).reveal() // 2
+                          for a in range(N_ASSETS)]
+    max_vol_rev        = [max_vol[a].reveal() for a in range(N_ASSETS)]
+
+    for a in range(N_ASSETS):
+        print_ln("Asset %s: clearing_price=%s  volume=%s",
+                 a, clearing_price_rev[a], max_vol_rev[a])
+
+    # ── 5. ELIGIBLE ORDERS + PARTY AGGREGATION  [OPT5a + OPT3] ───────────────
+    # [OPT5a] Fused: eligibility computed inline, no intermediate elig arrays.
+    #         Eliminates 2 * TOTAL_ORDERS * N_ASSETS = 180 sint allocations.
+    # [OPT3]  Innermost loop over N_ASSETS: N_ASSETS comparisons + mults
+    #         at the same circuit depth per (party, order) slot.
+    party_bid_qty = [[sint(0) for _ in range(N_PARTIES)] for _ in range(N_ASSETS)]
+    party_ask_qty = [[sint(0) for _ in range(N_PARTIES)] for _ in range(N_ASSETS)]
+
+    for party in range(N_PARTIES):
+        for i in range(N_ORDERS):
+            slot = party * N_ORDERS + i
+            for a in range(N_ASSETS):                      # [OPT3, OPT5a]
+                bid_elig = bids_p[a][slot] >= clearing_price_rev[a]
+                ask_elig = (asks_p[a][slot] <= clearing_price_rev[a]) * (asks_p[a][slot] > 0)
+                party_bid_qty[a][party] = party_bid_qty[a][party] + bid_elig * bids_q[a][slot]
+                party_ask_qty[a][party] = party_ask_qty[a][party] + ask_elig * asks_q[a][slot]
+
+    # ── 6. RATIONED SIDE  [OPT3] ─────────────────────────────────────────────
+    # [OPT3] Assets processed in parallel: rationed-side checks for all assets
+    # at each party position are placed at the same circuit depth.
+    bids_rationed    = [None] * N_ASSETS
+    rationed_qty     = [[None] * N_PARTIES for _ in range(N_ASSETS)]
+    rationed_total_s = [sint(0) for _ in range(N_ASSETS)]
+
+    for a in range(N_ASSETS):
+        total_bid = sint(0)
+        total_ask = sint(0)
+        for party in range(N_PARTIES):
+            total_bid = total_bid + party_bid_qty[a][party]
+            total_ask = total_ask + party_ask_qty[a][party]
+        bids_rationed[a] = total_bid > total_ask
+
+        for p in range(N_PARTIES):
+            rationed_qty[a][p] = (
+                bids_rationed[a] * party_bid_qty[a][p] +
+                (1 - bids_rationed[a]) * party_ask_qty[a][p]
+            )
+            rationed_total_s[a] = rationed_total_s[a] + rationed_qty[a][p]
+
+    # ── 7. PRO-RATA FILLS  [OPT4 + OPT3] ────────────────────────────────────
+    # [OPT4] rationed_total kept secret via sfix division (no reveal).
+    #        safe_denom_s adds a secret bit to prevent division by zero.
+    # [OPT3] Inner loop over N_ASSETS places N_ASSETS sfix divisions at the
+    #        same circuit depth — all three denominators stay secret.
+    safe_denom_s = [rationed_total_s[a] + (rationed_total_s[a] == 0)
+                    for a in range(N_ASSETS)]
+
+    sfix.round_nearest = True
+
+    party_fills = [[sint(0) for _ in range(N_PARTIES)] for _ in range(N_ASSETS)]
+    total_alloc = [sint(0) for _ in range(N_ASSETS)]
+
+    for p in range(N_PARTIES):
+        for a in range(N_ASSETS):                          # [OPT3] N_ASSETS divs together
+            fill_sfix = sfix(rationed_qty[a][p]) * cfix(max_vol_rev[a]) / sfix(safe_denom_s[a])
+            party_fills[a][p] = sint(fill_sfix)
+            total_alloc[a] = total_alloc[a] + party_fills[a][p]
+
+    sfix.round_nearest = False
+
+    # ── 8. RESIDUAL ALLOCATION  [OPT3] ───────────────────────────────────────
+    # [OPT3] Inner loop over N_ASSETS: residual checks for all assets at
+    # each party position are independent and land at the same circuit depth.
+    residual_left = [max_vol[a] - total_alloc[a] for a in range(N_ASSETS)]
+
+    for p in range(N_PARTIES):
+        for a in range(N_ASSETS):                          # [OPT3]
+            wants_more    = party_fills[a][p] < rationed_qty[a][p]
+            has_residuals = residual_left[a] > 0
+            gets_unit     = wants_more * has_residuals
+            party_fills[a][p] = party_fills[a][p] + gets_unit
+            residual_left[a]  = residual_left[a]  - gets_unit
+
+    # ── 9. OUTPUT ─────────────────────────────────────────────────────────────
+    for a in range(N_ASSETS):
+        print_ln("Asset %s Results:", a)
+        print_ln("  Clearing Price    : %s", clearing_price_rev[a])
+        print_ln("  Transacted Volume : %s", max_vol_rev[a])
+        for p in range(N_PARTIES):
+            print_ln("  Party %s fill     : %s", p, party_fills[a][p].reveal())
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+run_all_auctions()

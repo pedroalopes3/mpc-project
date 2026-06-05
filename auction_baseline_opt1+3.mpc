@@ -2,31 +2,11 @@
 N_PARTIES = 3
 N_ASSETS = 3  
 N_ORDERS = 10
-MAX_PRICE = 1000
 
 TOTAL_ORDERS = N_PARTIES * N_ORDERS
 
 
 def run_auction(asset_id):
-    """
-    Execute a sealed-bid double (dark) auction for one asset.
-
-    Model:
-        Each of the N_PARTIES parties is a distributor (broker/exchange member)
-        that has collected N_ORDERS buy/sell orders from its own clients.
-        The MPC determines:
-          * The uniform clearing price p* at which the market clears.
-          * The total transacted volume V*.
-          * One fill per party: how many units that party's clients collectively
-            receive. The party then privately distributes this fill to its
-            clients using its own internal records.
-
-    Privacy guarantee:
-        All intermediate values (individual order prices, quantities, per-rung
-        demand/supply curves) remain secret-shared throughout. Only the final
-        market results are revealed via .reveal() — each call is justified
-        in the comments below.
-    """
     #1 INPUT RETRIEVAL - We make 4 secret arrays with 30 len (party0/party1/party2)
     bids_p = sint.Array(TOTAL_ORDERS)
     bids_q = sint.Array(TOTAL_ORDERS)
@@ -43,20 +23,20 @@ def run_auction(asset_id):
             idx += 1
 
 
-    #2 OBLIVIOUS SORTING - Merge arrays into a 30x3 matrix (price/bid_qty/ask_qty)
+    #2 OBLIVIOUS SORTING - Merge arrays into a 60x3 matrix (price/bid_qty/ask_qty)
     #  then sort using the secret matrix .sort() thingy
     order_matrix = sint.Matrix(2 * TOTAL_ORDERS, 3)
 
     for i in range(TOTAL_ORDERS):
-        # First 30 are the bids section
-        order_matrix[i][0] = bids_p[i]
-        order_matrix[i][1] = bids_q[i]
-        order_matrix[i][2] = sint(0)
-
-        # Last 30 are the asks section
-        order_matrix[TOTAL_ORDERS + i][0] = asks_p[i]
-        order_matrix[TOTAL_ORDERS + i][1] = sint(0)
-        order_matrix[TOTAL_ORDERS + i][2] = asks_q[i]
+        # First 30 are the asks section
+        order_matrix[i][0] = asks_p[i]
+        order_matrix[i][1] = sint(0)
+        order_matrix[i][2] = asks_q[i]
+        # Last 30 are the bids section
+        order_matrix[TOTAL_ORDERS + i][0] = bids_p[i]
+        order_matrix[TOTAL_ORDERS + i][1] = bids_q[i]
+        order_matrix[TOTAL_ORDERS + i][2] = sint(0)
+        #IT NEEDS TO BE IN THIS ORDER SO WHEN SORTING ASKS REMAIN ABOVE AND SO FOR THE SAME PRICE THE CURVES CALCULATE PROPERLY WHEN THEY MEET IN THE MIDDLE
 
     order_matrix.sort() # supposedly O(N log^2 N)
 
@@ -79,7 +59,7 @@ def run_auction(asset_id):
 
     #3 CLEARING PRICE AND MAX VOL
     max_vol     = sint(0)
-    best_p_low  = sint(MAX_PRICE)  # mete isto >> que o max price I DONT THINK THIS NEEDS TO BE MAX_PRICE IT COULD BE 0
+    best_p_low  = sint(0)
     best_p_high = sint(0)
 
     for i in range(2 * TOTAL_ORDERS):
@@ -104,21 +84,19 @@ def run_auction(asset_id):
     clearing_price_rev = (best_p_low + best_p_high).reveal() // 2   # cint
     max_vol_rev = max_vol.reveal()   # cint
 
-    print_ln("Asset %s: clearing_price=%s  volume=%s", asset_id, clearing_price_rev, max_vol_rev)
-
 
     #4 ELIGIBLE ORDERS (asks<=cp and bids>=cp)
     bids_elig = sint.Array(TOTAL_ORDERS)
     asks_elig = sint.Array(TOTAL_ORDERS)
 
     for i in range(TOTAL_ORDERS):
-        bids_elig[i] = bids_p[i] >= clearing_price_rev          # sint OP cint
+        bids_elig[i] = bids_p[i] >= clearing_price_rev
         asks_elig[i] = (asks_p[i] <= clearing_price_rev) * (asks_p[i] > 0)
 
 
     #5 GROUP THINGS BY PARTY - needed for prorata we give to each distributor  
-    party_bid_qty = [sint(0)] * N_PARTIES #SEE THE IMPACT OF CHANGING THIS INTO sint.Array(N_PARTIES)
-    party_ask_qty = [sint(0)] * N_PARTIES #SEE THE IMPACT OF CHANGING THIS INTO sint.Array(N_PARTIES)
+    party_bid_qty = sint.Array(N_PARTIES)
+    party_ask_qty = sint.Array(N_PARTIES)
 
     for party in range(N_PARTIES):
         for i in range(N_ORDERS):
@@ -139,10 +117,7 @@ def run_auction(asset_id):
     bids_rationed = total_bid_qty > total_ask_qty
 
     # if bids_rationed == party_bid_qty, else bids_rationed == party_ask_qty
-    #rationed_party_qty = bids_rationed.if_else(party_bid_qty,  party_ask_qty)
-    rationed_party_qty = [
-        bids_rationed * party_bid_qty[p] + (1 - bids_rationed) * party_ask_qty[p] for p in range(N_PARTIES)
-    ]
+    rationed_party_qty = bids_rationed.if_else(party_bid_qty,  party_ask_qty)
     
     # Rationed side sum (denominator)
     rationed_total_s = sint(0)
@@ -199,6 +174,6 @@ def run_auction(asset_id):
         print_ln("  Party %s fill     : %s", p, party_fills[p].reveal())
 
 
-# ── Main: run auction for each asset ─────────────────────────────────────────
+
 for asset in range(N_ASSETS):
     run_auction(asset)
